@@ -1,5 +1,6 @@
 import { truncateToWidth } from "@earendil-works/pi-tui";
-import { anyMatch, highlight, snippet, type RoleTerms } from "./query.ts";
+import { msg } from "./i18n.ts";
+import { anyMatch, highlight, snippet, type RoleTerms, type Snippet } from "./query.ts";
 import type { PeekSession } from "./sessions.ts";
 import { fmtTime, padEndVisible } from "./text.ts";
 import type { PeekTheme } from "./theme.ts";
@@ -16,18 +17,30 @@ export function followSelection(selected: number, offset: number, visible: numbe
   return offset;
 }
 
+// Per-picker, one query/width revision per session; selection styling stays uncached.
+export type ListCache = WeakMap<PeekSession, { rt: RoleTerms; width: number; hits: number; snip: Snippet | undefined }>;
+
 // 一个会话的两行：时间 + 目录（有正文关键词时加命中数），首条消息或命中片段
-export function listRows(s: PeekSession, sel: boolean, lw: number, rt: RoleTerms, hasBody: boolean, t: PeekTheme): [string, string] {
+export function listRows(s: PeekSession, sel: boolean, lw: number, rt: RoleTerms, hasBody: boolean, t: PeekTheme, cache?: ListCache): [string, string] {
   const time = fmtTime(s.time);
   const cwdTail = s.cwd.replace(/\\/g, "/").split("/").slice(-2).join("/");
-  const hitBadge = hasBody
-    ? ` ·${s.msgs.reduce((n, m) => n + (anyMatch(m.text, rt[m.role]) ? 1 : 0), 0)}`
-    : "";
+  let analysis = hasBody ? cache?.get(s) : undefined;
+  if (hasBody && (!analysis || analysis.rt !== rt || analysis.width !== lw)) {
+    analysis = {
+      rt, width: lw,
+      hits: s.msgs.reduce((n, m) => n + (anyMatch(m.text, rt[m.role]) ? 1 : 0), 0),
+      snip: snippet(s.msgs, rt, lw),
+    };
+    cache?.set(s, analysis);
+  }
+  const hitBadge = hasBody ? ` ·${analysis!.hits}` : "";
   const l1 = `${sel ? "›" : " "} ${time} ${cwdTail}${hitBadge}`;
-  const snip = hasBody ? snippet(s.msgs, rt, lw) : undefined;
-  const l2 = snip !== undefined
-    ? `  ${highlight(snip.text, rt[snip.role], t)}`
-    : `  ${s.first}${s.name ? `  [${s.name}]` : ""}`;
+  const snip = hasBody ? analysis!.snip : undefined;
+  const l2 = s.pending
+    ? `  ${msg("loadingSession")}`
+    : snip !== undefined
+      ? `  ${highlight(snip.text, rt[snip.role], t)}`
+      : `  ${s.first}${s.name ? `  [${s.name}]` : ""}`;
   if (sel) {
     return [
       t.bg("selectedBg", padEndVisible(t.fg("accent", truncateToWidth(l1, lw)), lw)),
@@ -47,6 +60,7 @@ export function buildList(
   rt: RoleTerms,
   hasBody: boolean,
   t: PeekTheme,
+  cache?: ListCache,
 ): string[] {
   const rows: string[] = [];
   for (let i = 0, n = visibleItems(height); i < n; i++) {
@@ -56,7 +70,7 @@ export function buildList(
       rows.push(" ".repeat(lw), " ".repeat(lw));
       continue;
     }
-    rows.push(...listRows(s, idx === selected, lw, rt, hasBody, t));
+    rows.push(...listRows(s, idx === selected, lw, rt, hasBody, t, cache));
   }
   // 每项两行，height 是奇数时会少一行，补空行，否则最后一行右栏会顶到左边
   while (rows.length < height) rows.push(" ".repeat(lw));

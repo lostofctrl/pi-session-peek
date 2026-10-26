@@ -49,6 +49,8 @@ export function buildPreview(
   cache: RenderCache,
 ): Preview {
   if (!s) return { lines: [t.fg("dim", msg("noMatch"))], matchLines: [] };
+  // 懒加载：文件已经列出来、内容还在后台解析，先显示一行提示
+  if (s.pending) return { lines: [t.fg("dim", msg("loadingSession"))], matchLines: [] };
 
   const lines: string[] = [];
   const matchLines: number[] = [];

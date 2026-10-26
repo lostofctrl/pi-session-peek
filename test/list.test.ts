@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { bodyRows, paneWidths } from "../src/layout.ts";
-import { buildList, followSelection, listRows, visibleItems } from "../src/list.ts";
+import { buildList, followSelection, listRows, visibleItems, type ListCache } from "../src/list.ts";
 import { roleTerms, parseQuery } from "../src/query.ts";
 import type { PeekSession } from "../src/sessions.ts";
 import { strip, theme } from "./helpers.ts";
@@ -71,4 +71,27 @@ test("buildList：从 offset 起画满 height 行，空位补空，奇数高度�
   assert.ok(strip(rows[2]).includes("D:/c"));
   assert.equal(rows[4], " ".repeat(30));
   for (const r of rows) assert.equal(strip(r).length, 30);
+});
+
+
+test("listRows: reuse body analysis for selection/repaints; refresh on query and width", () => {
+  const s = sess("D:/proj", "alpha beta");
+  let reads = 0;
+  Object.defineProperty(s.msgs[0], "text", { get: () => { reads++; return "alpha beta"; } });
+  const rt = roleTerms(parseQuery("alpha").terms);
+  const cache: ListCache = new WeakMap();
+  const first = listRows(s, false, 40, rt, true, theme, cache);
+  const initialReads = reads;
+  assert.ok(initialReads > 0);
+  listRows(s, true, 40, rt, true, theme, cache);
+  assert.deepEqual(listRows(s, false, 40, rt, true, theme, cache), first);
+  assert.equal(reads, initialReads, "repaints and selection changes must not rescan body");
+  listRows(s, false, 50, rt, true, theme, cache);
+  assert.ok(reads > initialReads, "resize refreshes the snippet");
+  const resizedReads = reads;
+  const beta = roleTerms(parseQuery("beta").terms);
+  assert.deepEqual(listRows(s, false, 50, beta, true, theme, cache), listRows(s, false, 50, beta, true, theme));
+  assert.ok(reads > resizedReads, "new query refreshes matches");
+  s.name = "renamed";
+  assert.ok(strip(listRows(s, false, 50, roleTerms([]), false, theme, cache)[1]).includes("[renamed]"));
 });

@@ -3,7 +3,16 @@ import { basename } from "node:path";
 import { msg } from "./src/i18n.ts";
 import { attachMouse } from "./src/mouse.ts";
 import { PeekComponent } from "./src/peek-component.ts";
-import { deleteSession, renameSession, scanRoot, scanSessions, sessionsDir, type PeekSession } from "./src/sessions.ts";
+import {
+  deleteSession,
+  listSessionFiles,
+  loadSession,
+  pendingSession,
+  renameSession,
+  scanRoot,
+  sessionsDir,
+  type PeekSession,
+} from "./src/sessions.ts";
 
 // 这里只做注册：/peek 命令、--peek / --rp 启动参数，以及把删除 / 重命名 / 分叉注入给组件
 
@@ -58,11 +67,13 @@ export default function (pi: ExtensionAPI) {
       // 扫描范围跟着 pi 实际在用的会话目录走（--session-dir / 环境变量 / settings.json 都在里面）
       const root = scanRoot(ctx.sessionManager.getSessionDir());
       const customDir = root !== sessionsDir() ? root : undefined;
-      const all = (await scanSessions(root)).filter((s) => s.path !== currentFile);
-      if (!all.length) {
+      // 懒加载第一步：只列文件并 stat，不读内容。几千个会话也只要几百毫秒就能先把列表画出来
+      const files = (await listSessionFiles(root)).filter((f) => f.path !== currentFile);
+      if (!files.length) {
         ctx.ui.notify(msg("noSessions"), "info");
         return;
       }
+      const all = files.map(pendingSession);
 
       const initial = ((args ?? "").trim() || lastQuery) ?? "";
       type Picked = { s: PeekSession; action: "resume" | "fork" } | null;
@@ -71,7 +82,12 @@ export default function (pi: ExtensionAPI) {
         comp.requestRender = () => tui.requestRender();
         // 常规模式 pi 不开鼠标，自己开；全屏模式 pi-tui 会直接调 comp.handleMouse
         const mouse = attachMouse(comp, tui);
-        comp.onDispose = () => mouse.dispose();
+        let stopped = false;
+        const stop = () => {
+          stopped = true;
+          mouse.dispose();
+        };
+        comp.onDispose = stop;
         // 鼠标拖选后 Ctrl+C 复制。用 pi 自己的复制：原生剪贴板，不行再退到 OSC 52
         comp.onCopy = async (text) => {
           try {
@@ -83,14 +99,17 @@ export default function (pi: ExtensionAPI) {
         };
         comp.onResume = (s) => {
           lastQuery = comp.getQuery();
+          stop();
           done({ s, action: "resume" });
         };
         comp.onFork = (s) => {
           lastQuery = comp.getQuery();
+          stop();
           done({ s, action: "fork" });
         };
         comp.onCancel = () => {
           lastQuery = comp.getQuery();
+          stop();
           done(null);
         };
         comp.onDelete = async (s) => {
@@ -112,6 +131,42 @@ export default function (pi: ExtensionAPI) {
           ctx.ui.notify(ok ? msg("renamed", { name }) : msg("renameFailed"), ok ? "info" : "error");
           return ok;
         };
+
+        // 懒加载第二步：从新到旧在后台解析，一批一批填进已经画好的列表。
+        // 每批最多攒 24 个或 120ms，避免每个文件都重算一次过滤；关掉选择器后马上停
+        const FLUSH_FILES = 24;
+        const FLUSH_MS = 120;
+        const LOADERS = 8;
+        void (async () => {
+          let next = 0;
+          let buf: PeekSession[] = [];
+          let last = Date.now();
+          const flush = () => {
+            if (!buf.length || stopped) return;
+            const batch = buf;
+            buf = [];
+            last = Date.now();
+            comp.mergeLoaded(batch);
+          };
+          const worker = async () => {
+            while (!stopped && next < files.length) {
+              const file = files[next++];
+              let s: PeekSession | null = null;
+              try {
+                s = await loadSession(file.path);
+              } catch {
+                s = null;
+              }
+              if (stopped) return;
+              if (s) buf.push(s);
+              else comp.dropSession(file.path);
+              if (buf.length >= FLUSH_FILES || Date.now() - last >= FLUSH_MS) flush();
+            }
+          };
+          await Promise.all(Array.from({ length: Math.min(LOADERS, files.length) }, worker));
+          flush();
+        })();
+
         return comp;
       });
 

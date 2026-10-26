@@ -14,7 +14,7 @@ Search your [pi](https://pi.dev) session history by what was actually said, read
 - Renders the conversation with pi's own Markdown renderer, so headings, code blocks with syntax highlighting, tables and lists look the same as in the main transcript.
 - Filters as you type across conversation text and session name. The working directory is searched only with an explicit `dir:`, so a word from a project path does not match every session in that project. Tool call arguments and results are excluded from the search, so a keyword only matches sessions that actually discussed it.
 - Requires every space-separated keyword to match, and shows a snippet around the first hit in the list.
-- Understands `"exact phrases"`, `either|or`, `-exclude`, `name:` / `dir:` / `user:` / `ai:` prefixes and `/regex/`.
+- Understands `"exact phrases"`, `either|or`, `-exclude`, `name:` / `dir:` / `user:` / `ai:` prefixes, `/regex/`, and `pin:true` / `pin:false` for Pi Web's `/pin` state. `Alt+P` toggles a pinned-only view without touching the typed query.
 - Limits results to recently active sessions with `@7d`, `@24h`, `@2w` or `@1m`.
 - Highlights every hit in the preview and jumps between them with `Ctrl+N` / `Ctrl+P`.
 - Shows what the assistant actually did with `Ctrl+T`: one dim line per tool call (`⚙ bash  git status`, `⚙ edit  src/query.ts`) under the reply that made it. Off by default.
@@ -22,6 +22,21 @@ Search your [pi](https://pi.dev) session history by what was actually said, read
 - Toggles between the current directory tree and all projects with `Tab`.
 - Starts straight into the picker with `pi --rp` or `pi --peek=<keyword>`.
 - Parses each session file once and caches it by mtime, so reopening is instant.
+
+## Local performance customization
+
+This checkout retains the MIT-licensed upstream source from [Jeffropz/pi-session-peek](https://github.com/Jeffropz/pi-session-peek). It is a local customization, not a published GitHub fork.
+
+- `/peek` opens from file metadata alone: one `stat` per session file, no parsing. Rows appear right away, newest first, with `Loading session…` in the preview until their file is read.
+- Parsing runs in the background in small batches (8 readers, flush every 24 files or 120 ms) and merges into the visible list without moving the selection or resetting an unchanged preview. Sessions without message text are removed when their parse comes back empty, and a failed read leaves the row as a placeholder instead of aborting the picker.
+- On a 3377-file (2.6 GB) real session directory, a fresh process lists and renders the picker in about 0.4 s; before this change the same directory took about 15.6 s before the first frame. Full background parsing still takes ~18 s, but the picker stays usable while it runs.
+- List hit counts and snippets are reused across unchanged-query repaints and selection changes. Each picker keeps only one query/width revision per session; query edits and refiltering invalidate the cache.
+- Unchanged empty or malformed sessions are cached by mtime and size too; failed filesystem reads are retried.
+- JSONL parsing walks line boundaries without allocating a whole-file line array. Files are still read in full, and all history remains searchable.
+
+For this installation, replace `npm:pi-session-peek` in the `packages` list of `~/.pi/agent/settings.json` with `../../pi-plugin/pi-session-peek`, then run `/reload`. Do not load both copies. Restore the npm entry to undo activation.
+
+Verified with `npx tsc --noEmit` and `npm test` (148 tests), the benchmark above, and an isolated Pi 1.4.0 TUI session (`PI_CODING_AGENT_DIR` sandbox with a 300-file copy of the real session directory): `/peek` showed the picker after 63–86 ms, typing a filter updated it, and `Esc` returned to the editor. The background load is still CPU-bound on very large files: a single large JSONL parse can block the event loop for roughly 0.2 s once, so a keystroke at that moment can feel slightly delayed.
 
 ## 📦 Install
 
@@ -68,6 +83,7 @@ In TUI mode, run `/peek` and start typing. Press `Enter` on a session to continu
 | `Shift+↑` `Shift+↓` | Scroll preview by three lines |
 | `Ctrl+N` `Ctrl+P` | Next / previous hit line outside the current view; the top-right corner shows `hit k/n` |
 | `Ctrl+T` | Show / hide tool calls in the preview. Each call is one line with the tool name and its main argument (command, path, URL, query). Results are never shown. |
+| `Alt+P` | Show only sessions pinned in Pi Web with `/pin`; press again to show all. Stacks with the typed query. |
 | `Enter` | Resume the session |
 | `Ctrl+O` | Fork the session and open the fork |
 | `Ctrl+R` | Rename. Writes the same `session_info` entry as `/name`. |
@@ -103,11 +119,12 @@ The filter is case-insensitive and matches anywhere in the text. Whitespace sepa
 | `user:deploy` | Only the messages you wrote. `ai:` or `assistant:` for the replies. |
 | `/\bfoo\d+\b/` | JavaScript regular expression, case-insensitive, `^` and `$` match line boundaries. Use `\s` instead of a space. |
 | `@7d` | Sessions active in the last 7 days. Units: `h`, `d`, `w`, `m` (30 days). |
+| `pin:true` | Only sessions pinned in Pi Web with `/pin`. `pin:false` (or `-pin:true`) shows unpinned sessions; a session that was never pinned counts as unpinned. `Alt+P` toggles pinned-only as a separate filter that stacks with the query. |
 | `-user:"not now" ai:/todo\|fixme/ @2w` | Prefixes stack, and everything combines |
 
-Quotes are the escape hatch: `"-foo"`, `"a|b"`, `"name:x"` and `"/x/"` search for those characters literally. A regex that fails to compile is searched as plain text. Only positive terms are highlighted in the preview, and `name:` / `dir:` terms never touch the conversation, so `name:auth` alone shows the full conversation with no highlights.
+Quotes are the escape hatch: `"-foo"`, `"a|b"`, `"name:x"`, `"pin:true"` and `"/x/"` search for those characters literally. A regex that fails to compile is searched as plain text. Only positive text terms are highlighted in the preview; `name:` / `dir:` and `pin:` terms never touch the conversation, so `name:auth` alone shows the full conversation with no highlights.
 
-The search index holds user and assistant messages and the session name. The working directory is matched only by `dir:` / `cwd:` terms: with the current-directory scope every session shares the same path prefix, so a plain word from the path would match all of them. The index does not hold tool call arguments or tool results, and the tool lines shown by `Ctrl+T` are never matched or highlighted.
+The pin state is read from Pi Web's `pi-web:pin` records in the session file; the last record wins, and invalid or missing records count as unpinned. The search index holds user and assistant messages and the session name. The working directory is matched only by `dir:` / `cwd:` terms: with the current-directory scope every session shares the same path prefix, so a plain word from the path would match all of them. The index does not hold tool call arguments or tool results, and the tool lines shown by `Ctrl+T` are never matched or highlighted.
 
 ## 🌐 Language
 

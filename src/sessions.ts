@@ -29,9 +29,33 @@ export interface PeekSession {
   msgs: PeekMsg[];
   mtime: number;
   size: number; // 和 mtime 一起当缓存键：mtime 粒度粗的文件系统上连续两次写入可能同一个 mtime
+  pending?: boolean; // 懒加载占位：文件已列出但还没解析，除了 path / mtime / size 都还是空
+  pinned?: boolean; // pi-web 的 /pin 状态（最后一条 pi-web:pin 记录）；没写过就是 undefined
 }
 
-const sessionCache = new Map<string, PeekSession>();
+/** 只 stat 过的会话文件，按 mtime 倒序。不读内容，/peek 先用它把列表画出来 */
+export interface SessionFile {
+  path: string;
+  mtime: number;
+  size: number;
+}
+
+/** 列表项占位：立刻能排序、能画，解析完由 PeekComponent.mergeLoaded 原地填上 */
+export function pendingSession(f: SessionFile): PeekSession {
+  return {
+    path: f.path,
+    cwd: "",
+    time: new Date(f.mtime).toISOString(),
+    name: "",
+    first: "",
+    msgs: [],
+    mtime: f.mtime,
+    size: f.size,
+    pending: true,
+  };
+}
+
+const sessionCache = new Map<string, { mtime: number; size: number; session: PeekSession | null }>();
 const READ_CONCURRENCY = 16; // 同时读的文件数，太高会把 libuv 线程池排满
 
 const expandTilde = (p: string) => (p.startsWith("~") ? join(homedir(), p.slice(1)) : p);
@@ -100,9 +124,15 @@ function parseSession(path: string, raw: string, mtime: number, size: number): P
   let cwd = "";
   let time = "";
   let name = "";
+  let pinned: boolean | undefined;
   const msgs: PeekMsg[] = [];
 
-  for (const line of raw.split("\n")) {
+  // Avoid allocating an array of every JSONL line, including large ignored tool results.
+  let start = 0;
+  while (start < raw.length) {
+    const end = raw.indexOf("\n", start);
+    const line = raw.slice(start, end === -1 ? raw.length : end);
+    start = end === -1 ? raw.length : end + 1;
     if (!line) continue;
     try {
       if (line.includes('"type":"session"')) {
@@ -117,7 +147,14 @@ function parseSession(path: string, raw: string, mtime: number, size: number): P
         continue;
       }
       // 先用子串粗筛，省掉大部分行的 JSON.parse
-      if (!line.includes('"role":"user"') && !line.includes('"role":"assistant"')) continue;
+      if (!line.includes('"role":"user"') && !line.includes('"role":"assistant"')) {
+        // pi-web 的置顶标记是 custom 记录，不在正文里；最后一条生效，和 pi-web 的读法一致
+        if (line.includes("pi-web:pin")) {
+          const o = JSON.parse(line);
+          if (o.type === "custom" && o.customType === "pi-web:pin") pinned = o.data?.pinned === true;
+        }
+        continue;
+      }
       const o = JSON.parse(line);
       if (o.type !== "message") continue;
       const role = o.message?.role;
@@ -144,11 +181,12 @@ function parseSession(path: string, raw: string, mtime: number, size: number): P
     mtime,
     size,
     first: firstText.text.replace(/\s+/g, " ").slice(0, 80),
+    ...(pinned === undefined ? {} : { pinned }),
   };
 }
 
 // 单个文件：mtime 没变直接用缓存，否则重新读和解析
-async function loadSession(file: string): Promise<PeekSession | null> {
+export async function loadSession(file: string): Promise<PeekSession | null> {
   let mtime: number;
   let size: number;
   try {
@@ -159,7 +197,7 @@ async function loadSession(file: string): Promise<PeekSession | null> {
     return null;
   }
   const hit = sessionCache.get(file);
-  if (hit && hit.mtime === mtime && hit.size === size) return hit;
+  if (hit && hit.mtime === mtime && hit.size === size) return hit.session;
   let raw: string;
   try {
     raw = await readFile(file, "utf8");
@@ -167,28 +205,51 @@ async function loadSession(file: string): Promise<PeekSession | null> {
     return null;
   }
   const parsed = parseSession(file, raw, mtime, size);
-  if (parsed) sessionCache.set(file, parsed);
+  sessionCache.set(file, { mtime, size, session: parsed });
   return parsed;
 }
 
 /** 全部会话，按最后修改时间倒序；文件没变的直接用缓存。
  * 目录遍历和文件读取都走异步 I/O，几百个会话也不会把 TUI 卡住 */
 export async function scanSessions(root: string = sessionsDir()): Promise<PeekSession[]> {
-  const files: string[] = [];
-  await walkJsonl(root, files);
+  const files = await listSessionFiles(root);
 
   const out: PeekSession[] = [];
   let next = 0;
   const worker = async () => {
     while (next < files.length) {
-      const s = await loadSession(files[next++]);
+      const s = await loadSession(files[next++].path);
       if (s) out.push(s);
     }
   };
   await Promise.all(Array.from({ length: Math.min(READ_CONCURRENCY, files.length) }, worker));
 
+  return out.sort((a, b) => b.mtime - a.mtime);
+}
+
+/** 只走目录并 stat，不读 JSONL：冷启动时几千个会话也能在几百毫秒内画出列表。
+ * 按 mtime 倒序，后台解析按这个顺序从新到旧填内容 */
+export async function listSessionFiles(root: string = sessionsDir()): Promise<SessionFile[]> {
+  const paths: string[] = [];
+  await walkJsonl(root, paths);
+
+  const out: SessionFile[] = [];
+  let next = 0;
+  const worker = async () => {
+    while (next < paths.length) {
+      const path = paths[next++];
+      try {
+        const st = await stat(path);
+        out.push({ path, mtime: st.mtimeMs, size: st.size });
+      } catch {
+        // 列目录到 stat 之间被删了：跳过
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(READ_CONCURRENCY, paths.length) }, worker));
+
   // 文件已经不在了的，从缓存里去掉
-  const seen = new Set(files);
+  const seen = new Set(paths);
   for (const key of [...sessionCache.keys()]) {
     if (!seen.has(key)) sessionCache.delete(key);
   }

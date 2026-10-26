@@ -5,7 +5,19 @@ import { join } from "node:path";
 import { after, before, test } from "node:test";
 import { sanitizeText } from "../src/ansi.ts";
 import { matchesSession, parseQuery } from "../src/query.ts";
-import { deleteSession, renameSession, scanRoot, scanSessions, sessionsDir, toolSummary, trashCommands, type PeekSession } from "../src/sessions.ts";
+import {
+  deleteSession,
+  listSessionFiles,
+  loadSession,
+  pendingSession,
+  renameSession,
+  scanRoot,
+  scanSessions,
+  sessionsDir,
+  toolSummary,
+  trashCommands,
+  type PeekSession,
+} from "../src/sessions.ts";
 
 let agentDir: string;
 let dir: string;
@@ -255,4 +267,95 @@ test("deleteSession: 回收站命令超时抛错但文件已经没了，算进�
   const p = session("to", { cwd: "D:\proj", time: "2026-09-11T00:00:00.000Z", msgs: [["user", "bye"]] });
   const r = await deleteSession(p, async () => { rmSync(p); throw new Error("timeout"); }, "win32");
   assert.equal(r, "trash");
+});
+
+
+test("scanSessions: cache empty parses, retry changed files at the same mtime", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "peek-null-cache-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const p = join(root, "empty.jsonl");
+  const empty = JSON.stringify({ type: "message", message: { role: "user", content: "" } });
+  writeFileSync(p, empty);
+  const stamp = new Date("2026-09-01T00:00:00Z");
+  utimesSync(p, stamp, stamp);
+  let parses = 0;
+  const original = JSON.parse;
+  t.mock.method(JSON, "parse", (text: string, reviver?: Parameters<typeof JSON.parse>[1]) => {
+    if (text === empty) parses++;
+    return original(text, reviver);
+  });
+  assert.deepEqual(await scanSessions(root), []);
+  assert.equal(parses, 1);
+  assert.deepEqual(await scanSessions(root), []);
+  assert.equal(parses, 1, "unchanged empty sessions must not be reparsed");
+  writeFileSync(p, empty + "\n" + JSON.stringify({ type: "message", message: { role: "user", content: "now searchable" } }));
+  utimesSync(p, stamp, stamp);
+  const updated = await scanSessions(root);
+  assert.equal(updated.length, 1);
+  assert.equal(updated[0].first, "now searchable");
+  rmSync(p);
+  assert.deepEqual(await scanSessions(root), []);
+});
+
+test("listSessionFiles: 只列文件和 mtime/size，按时间倒序，空会话也算（给懒加载先画列表）", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "peek-lazy-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const old = session2(root, "old", "2026-01-01T00:00:00.000Z", "old first");
+  const recent = session2(root, "recent", "2026-06-01T00:00:00.000Z", "recent first");
+  // 一条正文都没有的会话：scanSessions 会丢掉，但列表仍要先显示它，解析后再移除
+  const empty = join(root, "empty.jsonl");
+  writeFileSync(empty, JSON.stringify({ type: "message", message: { role: "user", content: "" } }));
+  const emptyStamp = new Date("2026-03-01T00:00:00.000Z");
+  utimesSync(empty, emptyStamp, emptyStamp);
+
+  const files = await listSessionFiles(root);
+  assert.deepEqual(files.map((f) => f.path), [recent, empty, old]);
+  assert.ok(files[0].mtime > files[1].mtime);
+  assert.ok(files.every((f) => f.size >= 0));
+
+  const placeholder = pendingSession(files[0]);
+  assert.equal(placeholder.path, recent);
+  assert.equal(placeholder.pending, true);
+  assert.deepEqual(placeholder.msgs, []);
+  assert.equal(placeholder.mtime, files[0].mtime);
+  assert.equal(placeholder.time, new Date(files[0].mtime).toISOString());
+  assert.ok(!Number.isNaN(new Date(placeholder.time).getTime()));
+
+  // 占位项本身不读文件；显式 loadSession 才解析出内容
+  const parsed = await loadSession(recent);
+  assert.equal(parsed?.first, "recent first");
+});
+
+function session2(root: string, name: string, time: string, text: string): string {
+  const p = join(root, `${name}.jsonl`);
+  writeFileSync(
+    p,
+    line({ type: "session", version: 3, id: name, timestamp: time, cwd: "D:\\lazy" }) +
+      line({ type: "message", id: `${name}-m`, parentId: null, timestamp: time, message: { role: "user", content: [{ type: "text", text }] } }),
+  );
+  const stamp = new Date(time);
+  utimesSync(p, stamp, stamp);
+  return p;
+}
+
+test("scanSessions: pi-web 的 /pin 状态取最后一条记录，没写过 /pin 就不带 pinned", async () => {
+  const p = session("pinned", { cwd: "D:\\proj", time: "2026-09-05T00:00:00.000Z", msgs: [["user", "x"]] });
+  const find = async () => (await scanSessions()).find((s) => s.path === p)!;
+  assert.equal((await find()).pinned, undefined);
+
+  writeFileSync(p, readFileSync(p, "utf8") + line({ type: "custom", id: "pin1", parentId: "pinned-0", timestamp: "2026-09-05T00:00:01.000Z", customType: "pi-web:pin", data: { version: 1, pinned: true } }));
+  assert.equal((await find()).pinned, true);
+
+  // 坏数据按未置顶处理，和 pi-web 的读法一致
+  writeFileSync(p, readFileSync(p, "utf8") + line({ type: "custom", id: "pin2", parentId: "pin1", timestamp: "2026-09-05T00:00:02.000Z", customType: "pi-web:pin", data: { version: 1, pinned: "yes" } }));
+  assert.equal((await find()).pinned, false);
+
+  writeFileSync(p, readFileSync(p, "utf8") + line({ type: "custom", id: "pin3", parentId: "pin2", timestamp: "2026-09-05T00:00:03.000Z", customType: "pi-web:pin", data: { version: 1, pinned: true } }));
+  assert.equal((await find()).pinned, true, "取消置顶后再置顶，最后一条说了算");
+
+  // 别把正文里提到 pi-web:pin 的消息当成标记
+  const q = session("mention", { cwd: "D:\\proj", time: "2026-09-05T00:00:00.000Z", msgs: [["user", 'we use "pi-web:pin" here']] });
+  const m = (await scanSessions()).find((s) => s.path === q)!;
+  assert.equal(m.pinned, undefined);
+  assert.ok(matchesSession(m, parseQuery("pi-web:pin").terms));
 });

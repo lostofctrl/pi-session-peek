@@ -11,7 +11,7 @@ setLang("zh");
 
 const tick = (ms = 5) => new Promise((r) => setTimeout(r, ms));
 
-const KEY = { enter: "\r", tab: "\t", up: "\x1b[A", down: "\x1b[B", bs: "\x7f", esc: "\x1b", cc: "\x03", cd: "\x04", cf: "\x06", co: "\x0f", cr: "\x12", ct: "\x14", cu: "\x15" };
+const KEY = { enter: "\r", tab: "\t", up: "\x1b[A", down: "\x1b[B", bs: "\x7f", esc: "\x1b", cc: "\x03", cd: "\x04", cf: "\x06", co: "\x0f", cr: "\x12", ct: "\x14", cu: "\x15", ap: "\x1bp" };
 
 function mk(cwd: string, texts: string[], ageDays: number, name = ""): PeekSession {
   const mtime = Date.now() - ageDays * 86400e3;
@@ -896,4 +896,197 @@ test("dispose 停掉计时器并调 onDispose", () => {
   c.render(120);
   c.dispose();
   assert.equal(disposed, 1);
+});
+
+
+test("unchanged-query repaint, preview scroll and selection reuse list body analysis", () => {
+  const all = [mk("D:/proj", ["alpha beta", "reply"], 1), mk("D:/proj", ["other alpha"], 2)];
+  let reads = 0;
+  Object.defineProperty(all[0].msgs[0], "text", { get: () => { reads++; return "alpha beta"; } });
+  const c = make(all, "D:/proj", "alpha");
+  c.render(120);
+  const firstReads = reads;
+  c.invalidate();
+  c.render(120);
+  c.handleInput(KEY.cf);
+  c.render(120);
+  c.handleInput(KEY.down);
+  c.render(120);
+  assert.equal(reads, firstReads, "non-query redraws must not reread the first session body");
+  c.handleInput("\x05"); // Ctrl+E: initial setValue leaves the cursor at the beginning.
+  type(c, " beta");
+  const rows = c.render(120).map(strip);
+  assert.ok(reads > firstReads, "editing the query must refresh match analysis");
+  assert.equal(c.filtered.length, 1);
+  assert.ok(rows.some((r: string) => r.includes("alpha beta")));
+  c.dispose();
+});
+
+// 懒加载：/peek 先用占位项画出列表，后台解析完一批就用 mergeLoaded 原地填充
+function pending(path: string, mtime: number): PeekSession {
+  return { path, cwd: "", time: new Date(mtime).toISOString(), name: "", first: "", msgs: [], mtime, size: 0, pending: true };
+}
+
+function parsed(path: string, cwd: string, texts: string[], mtime: number): PeekSession {
+  return {
+    path,
+    cwd,
+    time: new Date(mtime).toISOString(),
+    name: "",
+    first: texts[0],
+    msgs: texts.map((text, i) => ({ role: i % 2 ? "assistant" : "user", text })),
+    mtime,
+    size: 0,
+  };
+}
+
+test("懒加载：占位项先列出，分批填充时保留选中项，选中项载入后才重建预览", () => {
+  const t0 = Date.now();
+  const a = pending("/a.jsonl", t0);
+  const b = pending("/b.jsonl", t0 - 1000);
+  const c = make([a, b], "D:/nowhere");
+  const rows = c.render(120).map(strip);
+  assert.ok(rows[0].includes("载入中 2"));
+  assert.ok(rows[3].includes("正在载入会话"));
+
+  c.handleInput(KEY.down);
+  assert.equal(c.selected, 1);
+  c.render(120);
+  const key = c.previewKey;
+  assert.ok(key.includes("/b.jsonl"));
+
+  // 先载入没选中的那条：列表保持选中 /b，预览不能被打回重建
+  c.mergeLoaded([parsed("/a.jsonl", "D:/other", ["alpha"], t0)]);
+  assert.equal(c.selected, 1);
+  assert.equal(c.filtered[1], b);
+  assert.equal(a.pending, undefined);
+  assert.equal(b.pending, true);
+  assert.equal(c.previewKey, key);
+  assert.ok(c.render(120).map(strip)[0].includes("载入中 1"));
+
+  // 选中的载入：预览重建，显示解析出来的内容
+  c.mergeLoaded([parsed("/b.jsonl", "D:/other", ["beta"], t0 - 1000)]);
+  assert.equal(c.selected, 1);
+  assert.notEqual(c.previewKey, key);
+  const out = c.render(120).map(strip);
+  assert.ok(out.some((l: string) => l.includes("beta")));
+  assert.ok(!out[0].includes("载入中"));
+});
+
+test("懒加载：有关键词时占位项先不列，命中随批次补进来", () => {
+  const t0 = Date.now();
+  const a = pending("/a.jsonl", t0);
+  const b = pending("/b.jsonl", t0 - 1000);
+  const c = make([a, b], "D:/nowhere", "alpha");
+  assert.equal(c.filtered.length, 0);
+  let rows = c.render(120).map(strip);
+  assert.ok(rows[0].includes("匹配 0/2"));
+  assert.ok(rows[0].includes("载入中 2"));
+
+  c.mergeLoaded([parsed("/a.jsonl", "D:/other", ["beta"], t0)]);
+  assert.equal(c.filtered.length, 0, "没有命中的已载入项不能混进来");
+  c.mergeLoaded([parsed("/b.jsonl", "D:/other", ["alpha"], t0 - 1000)]);
+  assert.equal(c.filtered.length, 1);
+  assert.equal(c.filtered[0].path, "/b.jsonl");
+  rows = c.render(120).map(strip);
+  assert.ok(rows[0].includes("匹配 1/2"));
+  assert.ok(rows[0].includes("载入中 0") === false);
+});
+
+test("懒加载：第一批当前目录树会话到了自动切范围，Tab 之后不再自动切", () => {
+  const t0 = Date.now();
+  const c = make([pending("/a.jsonl", t0), pending("/b.jsonl", t0 - 1000)], "D:/proj");
+  assert.equal(c.scope, "all", "占位项还不知道 cwd，先按全局画");
+  c.mergeLoaded([parsed("/a.jsonl", "D:/proj/sub", ["x"], t0)]);
+  assert.equal(c.scope, "current");
+  assert.equal(c.filtered.length, 1);
+
+  const d = make([pending("/a.jsonl", t0), pending("/b.jsonl", t0 - 1000)], "D:/proj");
+  d.handleInput(KEY.tab);
+  d.handleInput(KEY.tab); // 用户自己切回全局
+  assert.equal(d.scope, "all");
+  d.mergeLoaded([parsed("/a.jsonl", "D:/proj/sub", ["x"], t0)]);
+  assert.equal(d.scope, "all", "用户手动选过的范围不能被自动切换覆盖");
+  assert.equal(d.filtered.length, 2);
+});
+
+test("懒加载：删除占位项后，晚到的解析结果不会把它加回来", async () => {
+  const c = make([pending("/gone.jsonl", Date.now())], "D:/nowhere");
+  c.onDelete = async () => true;
+  c.handleInput(KEY.cd);
+  c.handleInput("y");
+  await tick();
+  assert.equal(c.all.length, 0);
+  assert.equal(c.filtered.length, 0);
+  c.mergeLoaded([parsed("/gone.jsonl", "D:/other", ["late"], Date.now())]);
+  assert.equal(c.all.length, 0);
+  assert.equal(c.filtered.length, 0);
+});
+
+test("懒加载：占位项不能改名，但 Enter / Ctrl+O 可以直接用路径", () => {
+  const c = make([pending("/a.jsonl", Date.now())], "D:/nowhere");
+  c.onRename = () => {
+    throw new Error("placeholder must not be renamed");
+  };
+  c.handleInput(KEY.cr);
+  assert.equal(c.mode, "search");
+
+  const got: string[] = [];
+  c.onResume = (s: PeekSession) => got.push("resume:" + s.path);
+  c.onFork = (s: PeekSession) => got.push("fork:" + s.path);
+  c.handleInput(KEY.enter);
+  c.handleInput(KEY.co);
+  assert.deepEqual(got, ["resume:/a.jsonl", "fork:/a.jsonl"]);
+});
+
+test("懒加载：没有正文的文件用 dropSession 从列表移除", () => {
+  const t0 = Date.now();
+  const a = pending("/a.jsonl", t0);
+  const b = pending("/b.jsonl", t0 - 1000);
+  const c = make([a, b], "D:/nowhere");
+  c.dropSession(a.path);
+  assert.equal(c.all.length, 1);
+  assert.equal(c.all[0], b);
+  assert.equal(c.filtered.length, 1);
+  c.handleInput(KEY.down); // 已经只剩一项，不能再往下
+  assert.equal(c.selected, 0);
+  c.dropSession("/not-there.jsonl"); // 不存在也不能出问题
+  assert.equal(c.all.length, 1);
+});
+
+test("懒加载：只有 pin 过滤时也不列占位项，解析后只补置顶的", () => {
+  const t0 = Date.now();
+  const a = pending("/a.jsonl", t0);
+  const b = pending("/b.jsonl", t0 - 1000);
+  const c = make([a, b], "D:/nowhere", "pinned:true");
+  assert.equal(c.filtered.length, 0);
+
+  c.mergeLoaded([parsed("/a.jsonl", "D:/other", ["alpha"], t0)]);
+  assert.equal(c.filtered.length, 0, "未置顶的会话不能混进来");
+  c.mergeLoaded([{ ...parsed("/b.jsonl", "D:/other", ["beta"], t0 - 1000), pinned: true }]);
+  assert.equal(c.filtered.length, 1);
+  assert.equal(c.filtered[0].path, "/b.jsonl");
+});
+
+test("Alt+P：只看置顶，再按一次取消，和输入框里的 pin: 条件是 AND", () => {
+  const t0 = Date.now();
+  const pinned = { ...parsed("/a.jsonl", "D:/other", ["alpha"], t0), pinned: true };
+  const plain = parsed("/b.jsonl", "D:/other", ["beta"], t0 - 1000);
+  const c = make([pinned, plain], "D:/nowhere");
+  assert.equal(c.filtered.length, 2);
+
+  c.handleInput(KEY.ap);
+  assert.equal(c.filtered.length, 1);
+  assert.equal(c.filtered[0].path, "/a.jsonl");
+  assert.ok(c.render(120).map(strip)[0].includes("只看置顶"));
+
+  c.handleInput(KEY.ap);
+  assert.equal(c.filtered.length, 2);
+  assert.ok(!c.render(120).map(strip)[0].includes("只看置顶"));
+
+  // 输入框里的 pin:false 和 Alt+P 同时生效 → 没有会话
+  const d = make([pinned, plain], "D:/nowhere", "pin:false");
+  assert.equal(d.filtered.length, 1);
+  d.handleInput(KEY.ap);
+  assert.equal(d.filtered.length, 0);
 });

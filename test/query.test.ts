@@ -66,7 +66,7 @@ test("parseQuery: @0d 不生效，@abc 当普通关键词", () => {
 });
 
 test("parseQuery: 空字符串", () => {
-  assert.deepEqual(parseQuery(""), { terms: [], since: 0, sinceLabel: "" });
+  assert.deepEqual(parseQuery(""), { terms: [], since: 0, sinceLabel: "", pinned: [] });
   assert.deepEqual(parseQuery("   ").terms, []);
 });
 
@@ -275,4 +275,31 @@ test("snippet: 没有消息命中返回 undefined；排除词和 name: 不产生
   assert.equal(snippet([{ role: "user", text: "nothing" }], roleTerms(terms("zzz")), 30), undefined);
   assert.equal(snippet([{ role: "user", text: "nothing" }], roleTerms([]), 30), undefined);
   assert.equal(snippet([{ role: "user", text: "nothing" }], roleTerms(terms("-zzz name:nothing")), 30), undefined);
+});
+
+test("pinned: 按 pi-web 的 /pin 状态过滤，- 取反，和普通词是 AND", () => {
+  const pin = { ...sess(["hello"]), pinned: true };
+  const plain = sess(["hello"]); // 没写过 /pin
+  const q = (s: string) => parseQuery(s);
+  assert.deepEqual(q("pinned:true").pinned, [true]);
+  assert.deepEqual(q("pin:FALSE").pinned, [false]);
+  assert.deepEqual(q("-pinned:true").pinned, [false]);
+  assert.deepEqual(q("-pin:false").pinned, [true]);
+  assert.deepEqual(q("pinned:1 pin:1").pinned, [true]); // 重复只算一次
+  assert.deepEqual(q("x").pinned, []);
+  assert.deepEqual(q('"pinned:true"').pinned, []); // 引号里是字面词
+
+  assert.ok(matchesSession(pin, [], q("pinned:true").pinned));
+  assert.ok(!matchesSession(plain, [], q("pinned:true").pinned));
+  assert.ok(matchesSession(plain, [], q("pinned:false").pinned));
+  assert.ok(!matchesSession(pin, [], q("pinned:false").pinned));
+  assert.ok(!matchesSession({ ...pin, pinned: undefined }, [], q("pinned:true").pinned));
+
+  // true 和 false 同时出现 → 没有会话能满足
+  assert.ok(!matchesSession(pin, [], q("pinned:true pinned:false").pinned));
+  assert.ok(!matchesSession(plain, [], q("pinned:true pinned:false").pinned));
+
+  // 和正文词一起用
+  assert.ok(matchesSession(pin, q("hello").terms, q("pinned:true").pinned));
+  assert.ok(!matchesSession(pin, q("bye").terms, q("pinned:true").pinned));
 });

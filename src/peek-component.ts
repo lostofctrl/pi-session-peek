@@ -13,7 +13,7 @@ import {
 import { msg } from "./i18n.ts";
 import { DragSelect } from "./drag-select.ts";
 import { BODY_TOP, bodyRows, paneWidths } from "./layout.ts";
-import { buildList, followSelection, listRows, visibleItems } from "./list.ts";
+import { buildList, followSelection, listRows, visibleItems, type ListCache } from "./list.ts";
 import { buildPreview, initialOffset, nextMatchTarget, type RenderCache } from "./preview.ts";
 import { matchesSession, parseQuery, roleTerms, type ParsedQuery, type RoleTerms } from "./query.ts";
 import { bounds, highlightColumns, rowColumns, selectionText, type Selection } from "./selection.ts";
@@ -40,6 +40,12 @@ export class PeekComponent implements Component, Focusable {
   private showTools = false; // Ctrl+T：预览里显示每次工具调用的一行摘要
   private previewLines: string[] = [];
   private matchLines: number[] = []; // 预览里含关键词的行（升序），Ctrl+N / Ctrl+P 用
+  private listCache: ListCache = new WeakMap();
+  private cachedListTerms?: { query: string; rt: RoleTerms; hasBody: boolean };
+  private byPath = new Map<string, PeekSession>(); // 路径 → 列表项；懒加载时按路径原地填充占位项
+  private scopeAuto = false;
+  // Alt+P：只看 Pi Web 里 /pin 过的会话；和输入框里的 pin: 条件是 AND
+  private pinOnly = false; // 还没解析出 cwd 时先按全局列出，第一批当前目录树的会话到了再自动切过去
   private rendered: RenderCache = new WeakMap(); // 每条消息渲染好的行，按宽度缓存
   // 三个互斥的输入状态：搜索（默认）、Ctrl+R 之后在输入新名字、Ctrl+D 之后等待确认。改名和确认只从搜索进入、退回搜索
   private mode: "search" | "rename" | "confirmDelete" = "search";
@@ -85,8 +91,13 @@ export class PeekComponent implements Component, Focusable {
     this.input = new Input({ placeholder: msg("searchPlaceholder") });
     this.renameInput = new Input({ placeholder: msg("renamePlaceholder") });
     if (initialQuery) this.input.setValue(initialQuery);
-    // 当前目录树下有会话就默认当前目录，否则全局
-    this.scope = all.some((s) => this.inCurrentTree(s)) ? "current" : "all";
+    for (const s of all) this.byPath.set(s.path, s);
+    // 当前目录树下有会话就默认当前目录，否则全局。
+    // 懒加载时占位项还没有 cwd，先按全局画出来；第一批解析完如果发现当前目录树有会话，
+    // scopeAuto 会在 mergeLoaded 里切过去，用户自己按过 Tab 之后就不再自动切换
+    const hasCurrent = all.some((s) => !s.pending && this.inCurrentTree(s));
+    this.scope = hasCurrent ? "current" : "all";
+    this.scopeAuto = !hasCurrent;
     this.refilter();
   }
 
@@ -116,20 +127,72 @@ export class PeekComponent implements Component, Focusable {
   }
 
   // keepSelection：尽量保持原来选中的会话，重命名后用
-  private refilter(keepSelection = false): void {
+  private refilter(keepSelection = false, keepPreview = false): void {
     const prev = keepSelection ? this.filtered[this.selected] : undefined;
-    const { terms, since } = this.query();
+    this.listCache = new WeakMap();
+    const q = this.query();
+    const { terms, since } = q;
+    const pinned = this.pinOnly ? [...q.pinned, true] : q.pinned;
     let out = this.all;
     if (this.scope === "current") out = out.filter((s) => this.inCurrentTree(s));
     if (since) out = out.filter((s) => s.mtime >= since);
-    if (terms.length) out = out.filter((s) => matchesSession(s, terms));
+    // 还没解析的会话不知道内容和置顶状态，有过滤条件时先不列；后台解析完会自动补进来
+    if (terms.length || pinned.length) out = out.filter((s) => !s.pending && matchesSession(s, terms, pinned));
     this.filtered = out;
     const idx = prev ? out.indexOf(prev) : -1;
     this.selected = idx >= 0 ? idx : keepSelection ? Math.min(this.selected, Math.max(0, out.length - 1)) : 0;
     if (!keepSelection) this.listOffset = 0;
     this.followSel = true;
-    this.previewKey = "";
-    this.drag.clear();
+    // 后台填充时会一批批调用；选中项没变就别重建预览，否则滚动位置一直被打回底部
+    if (!keepPreview) {
+      this.previewKey = "";
+      this.drag.clear();
+    }
+  }
+
+  /** 后台解析完一批会话：按路径原地填充占位项，然后只重算一次列表。
+   * 已经在列表里被删掉 / 已解析过的路径直接跳过；解析失败的文件用 dropSession 移除 */
+  mergeLoaded(list: PeekSession[]): void {
+    if (!list.length) return;
+    const selected = this.filtered[this.selected];
+    let selectedLoaded = false;
+    let any = false;
+    for (const s of list) {
+      const slot = this.byPath.get(s.path);
+      if (!slot || !slot.pending) continue;
+      Object.assign(slot, s);
+      delete slot.pending;
+      any = true;
+      if (slot === selected) selectedLoaded = true;
+    }
+    // 第一批带 cwd 的会话到了：用户没动过范围的话，自动落到当前目录树
+    if (this.scopeAuto && this.scope === "all" && this.all.some((s) => !s.pending && this.inCurrentTree(s))) {
+      this.scope = "current";
+      this.scopeAuto = false;
+      selectedLoaded = true;
+    }
+    if (!any) return;
+    this.refilter(true, !selectedLoaded);
+    this.invalidate();
+    this.requestRender?.();
+  }
+
+  /** 没有正文（空会话 / 解析失败）的文件：把占位项从列表里去掉 */
+  dropSession(path: string): void {
+    const s = this.byPath.get(path);
+    if (!s) return;
+    this.byPath.delete(path);
+    let i = this.all.indexOf(s);
+    if (i >= 0) this.all.splice(i, 1);
+    i = this.filtered.indexOf(s);
+    if (i >= 0) {
+      this.filtered.splice(i, 1);
+      this.selected = Math.min(this.selected, Math.max(0, this.filtered.length - 1));
+      this.followSel = true;
+      this.previewKey = "";
+    }
+    this.invalidate();
+    this.requestRender?.();
   }
 
   // 换选中的会话：预览重建，拖选的选区作废，视野跟过去
@@ -199,6 +262,8 @@ export class PeekComponent implements Component, Focusable {
           this.busy = true;
           void this.onDelete(s).then((ok) => {
             if (ok) {
+              this.byPath.delete(s.path);
+              // 后台可能还在读这个文件：解析完 mergeLoaded 找不到占位项就自动跳过
               let i = this.all.indexOf(s);
               if (i >= 0) this.all.splice(i, 1);
               i = this.filtered.indexOf(s);
@@ -237,6 +302,11 @@ export class PeekComponent implements Component, Focusable {
     }
     if (matchesKey(data, Key.ctrl("r"))) {
       const s = this.filtered[this.selected];
+      // 占位项还没有旧名字，解析中的内容也可能覆盖刚改的名字：等载入完再改名
+      if (s?.pending) {
+        this.showHint(msg("loadingSession"), false);
+        return;
+      }
       if (s && this.onRename && !this.busy) {
         this.mode = "rename";
         this.renameInput.setValue(s.name || "");
@@ -247,6 +317,7 @@ export class PeekComponent implements Component, Focusable {
     }
     if (matchesKey(data, Key.tab)) {
       this.scope = this.scope === "all" ? "current" : "all";
+      this.scopeAuto = false;
       this.refilter();
       this.invalidate();
       return;
@@ -284,6 +355,12 @@ export class PeekComponent implements Component, Focusable {
     }
     if (matchesKey(data, Key.shift("down"))) {
       this.previewOffset += 3;
+      this.invalidate();
+      return;
+    }
+    if (matchesKey(data, Key.alt("p"))) {
+      this.pinOnly = !this.pinOnly;
+      this.refilter();
       this.invalidate();
       return;
     }
@@ -400,6 +477,7 @@ export class PeekComponent implements Component, Focusable {
     } else if (ev.y === 0) {
       if (ev.x >= this.scopeSpan[0] && ev.x < this.scopeSpan[1]) {
         this.scope = this.scope === "all" ? "current" : "all";
+        this.scopeAuto = false;
         this.refilter();
         handled = changed = true;
       }
@@ -478,8 +556,12 @@ export class PeekComponent implements Component, Focusable {
 
   // 左栏用的关键词：排除词和 name: / cwd: 不在正文里高亮
   private listTerms(): { rt: RoleTerms; hasBody: boolean } {
-    const rt = roleTerms(this.query().terms);
-    return { rt, hasBody: rt.user.length > 0 || rt.assistant.length > 0 };
+    const query = this.getQuery();
+    if (!this.cachedListTerms || this.cachedListTerms.query !== query) {
+      const rt = roleTerms(this.query().terms);
+      this.cachedListTerms = { query, rt, hasBody: rt.user.length > 0 || rt.assistant.length > 0 };
+    }
+    return this.cachedListTerms;
   }
 
   // 右栏。预览键（会话 + 关键词 + 宽度 + 工具开关）没变就复用；变了重建，滚动位置放到首个命中处或底部
@@ -514,12 +596,16 @@ export class PeekComponent implements Component, Focusable {
     // 「范围[Tab]: 当前目录树」整段都能点
     const scopeStart = visibleWidth(msg("title"));
     this.scopeSpan = [scopeStart, scopeStart + visibleWidth(msg("scopeLabel") + scopeLabel)];
+    let pending = 0;
+    for (const s of this.all) if (s.pending) pending++;
     const head =
       t.fg("accent", t.bold(msg("title"))) +
       t.fg("dim", msg("scopeLabel")) +
       t.fg("warning", scopeLabel) +
       (sinceLabel ? t.fg("dim", msg("timeLabel")) + t.fg("warning", sinceLabel) : "") +
-      t.fg("dim", msg("matchCount", { n: this.filtered.length, total: this.all.length }));
+      t.fg("dim", msg("matchCount", { n: this.filtered.length, total: this.all.length })) +
+      (this.pinOnly ? t.fg("warning", msg("pinOnBadge")) : "") +
+      (pending ? t.fg("dim", msg("loading", { n: pending })) : "");
     out.push(truncateToWidth(head, width));
     out.push(this.input.render(width)[0] ?? "");
     out.push(t.fg("borderMuted", "─".repeat(width)));
@@ -534,7 +620,7 @@ export class PeekComponent implements Component, Focusable {
       this.followSel = false;
     }
     this.listOffset = Math.min(this.listOffset, Math.max(0, this.filtered.length - visible));
-    const leftRows = buildList(this.filtered, this.selected, this.listOffset, H, lw, rt, hasBody, t);
+    const leftRows = buildList(this.filtered, this.selected, this.listOffset, H, lw, rt, hasBody, t, this.listCache);
 
     const maxOff = Math.max(0, this.previewLines.length - H);
     if (this.previewOffset > maxOff) this.previewOffset = maxOff;
@@ -576,7 +662,7 @@ export class PeekComponent implements Component, Focusable {
       out.push(truncateToWidth(t.fg("warning", prefix) + inputLine, width));
     } else if (this.mode === "confirmDelete") {
       const s = this.filtered[this.selected];
-      const desc = s ? `${fmtTime(s.time, true)} ${s.first.slice(0, 30)}` : "";
+      const desc = !s ? "" : s.pending ? `${fmtTime(s.time, true)} ${msg("loadingSession")}` : `${fmtTime(s.time, true)} ${s.first.slice(0, 30)}`;
       out.push(
         truncateToWidth(
           t.fg("error", t.bold(msg("confirmDelete", { desc }))),
