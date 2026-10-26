@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { bodyRows, paneWidths } from "../src/layout.ts";
-import { buildList, followSelection, listRows, visibleItems, type ListCache } from "../src/list.ts";
+import { ACTIVE_MS, buildList, followSelection, isActive, listRows, visibleItems, type ListCache } from "../src/list.ts";
 import { roleTerms, parseQuery } from "../src/query.ts";
 import type { PeekSession } from "../src/sessions.ts";
 import { strip, theme } from "./helpers.ts";
@@ -132,4 +132,37 @@ test("listRows: reuse body analysis for selection/repaints; refresh on query and
   assert.ok(reads > resizedReads, "new query refreshes matches");
   s.name = "renamed";
   assert.ok(strip(listRows(s, false, 50, roleTerms([]), false, theme, cache)[1]).includes("[renamed]"));
+});
+
+test("isActive：ACTIVE_MS 之内写过算活跃，正好到点不算", () => {
+  const s = sess("D:/work/alpha", "hello");
+  assert.equal(isActive(s, NOW), false, "两天前写的：不活跃");
+  assert.equal(isActive({ ...s, mtime: NOW - 1000 }, NOW), true);
+  assert.equal(isActive({ ...s, mtime: NOW - ACTIVE_MS + 1 }, NOW), true);
+  assert.equal(isActive({ ...s, mtime: NOW - ACTIVE_MS }, NOW), false);
+});
+
+test("listRows：刚写过的会话，目录后面有个绿点，列还是对齐的", () => {
+  const active = { ...sess("D:/work/alpha", "hello"), mtime: NOW - 1000 };
+  const idle = sess("D:/work/beta", "hello");
+  const colors: string[] = [];
+  const spy = { ...theme, fg: (c: string, s: string) => { colors.push(c); return s; } };
+  const [l1] = listRows(active, false, 60, NO_TERMS.rt, false, spy, undefined, "prompt", NOW);
+  const [d1] = listRows(idle, false, 60, NO_TERMS.rt, false, theme, undefined, "prompt", NOW);
+  assert.ok(strip(l1).trimEnd().endsWith("alpha ●"), `目录后面跟绿灯：${JSON.stringify(strip(l1).trimEnd())}`);
+  assert.ok(!strip(d1).includes("●"));
+  // 绿点插在目录和命中数之间，时间 / 目录这两列不受影响
+  assert.equal(strip(l1).indexOf("2d"), strip(d1).indexOf("2d"));
+  assert.equal(strip(l1).indexOf("D:/work"), strip(d1).indexOf("D:/work"));
+  assert.ok(colors.includes("success"), `绿点用 success 色：${colors.join(",")}`);
+});
+
+test("listRows：活跃会话的绿点不把选中行后面的命中数洗成默认色", () => {
+  const s = { ...sess("D:/work/alpha", "hello"), mtime: NOW - 1000 };
+  const rt = roleTerms(parseQuery("hello").terms);
+  const [l1] = listRows(s, true, 60, rt, true, theme, undefined, "prompt", NOW);
+  const text = strip(l1).trimEnd();
+  assert.ok(text.endsWith("·1"), `命中数还在行尾：${JSON.stringify(text)}`);
+  const after = l1.slice(l1.indexOf("·1"));
+  assert.ok(!after.includes("<fg:"), "命中数仍在外层 accent 样式里，没有多包一层默认色");
 });

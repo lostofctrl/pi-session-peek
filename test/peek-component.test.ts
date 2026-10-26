@@ -1449,3 +1449,22 @@ test("右键菜单：点菜单外关闭，随后补的 click 也不会选中下�
   assert.deepEqual(resumed, [], "关闭菜单的 click 不能进入会话");
   assert.equal(c.selected, selectedBefore, "也没有改选中项");
 });
+
+test("活跃绿点：开着的选择器重画一次就按当前时间算，超过 10 分钟自己消失", () => {
+  const base = Date.now();
+  const s = { ...mk("D:/proj", ["alpha beta", "reply one"], 1), mtime: base - 1000 };
+  const c = make([s], "D:/proj");
+  let clock = base;
+  c.now = () => clock;
+
+  const has = () => strip(c.render(120).slice(2, 4).join("\n")).includes("●");
+
+  assert.equal(has(), true, "刚写过：有绿点");
+  // 光走过时间不算数：渲染结果按宽 / 高缓存，得先失效再画
+  clock = base + 11 * 60e3;
+  assert.equal(has(), true, "没重画就还是上一次的缓存");
+  c.invalidate();
+  assert.equal(has(), false, "重画之后超过 10 分钟：绿点消失");
+  // 相对时间也跟着这个时钟走，和绿点对得上：11 分钟就显示 11m，同时没有绿点
+  assert.ok(strip(c.render(120).slice(2, 4).join("\n")).includes("11m"), "年龄列也走到 11m 了");
+});

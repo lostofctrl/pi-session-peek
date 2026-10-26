@@ -7,6 +7,13 @@ import type { PeekTheme } from "./theme.ts";
 
 // 左栏：每个会话两行，全是纯函数。滚动偏移由组件持有，这里只算"选中项要留在视口里时偏移该是多少"
 
+// pi 不会一直占着会话文件（不锁、不保持 fd），没法直接问"哪个会话正开着"。
+// 退一步看"刚刚还在动"：这么久之内写过文件，可能是另一个 pi 正在用的会话。
+// 注意这是提示不是事实：mtime 是打开选择器时读到的，之后不会重新 stat
+export const ACTIVE_MS = 10 * 60e3;
+
+export const isActive = (s: PeekSession, now: number): boolean => now - s.mtime < ACTIVE_MS;
+
 // 主体 height 行能放下几个会话（每个两行）
 export const visibleItems = (height: number): number => Math.max(1, Math.floor(height / 2));
 
@@ -52,9 +59,14 @@ export function listRows(
     cache?.set(s, analysis);
   }
   const hitBadge = hasBody ? ` ·${analysis!.hits}` : "";
+  // 刚写过（多半正开在别的 pi 里）：目录后面点个绿点。选中那一行是 accent 色，绿点单独上色，
+  // 别让它的收尾码把后面的命中数也洗掉
+  const activeBadge = isActive(s, now) ? t.fg("success", " ●") : "";
   const head = `${sel ? "›" : " "} `;
-  const rest = `${age} ${cwdTail}${hitBadge}`;
-  const l1 = sel ? t.fg("accent", head) + statusCell(s, t) + t.fg("accent", rest) : head + statusCell(s, t) + rest;
+  const rest = `${age} ${cwdTail}`;
+  const l1 = sel
+    ? t.fg("accent", head) + statusCell(s, t) + t.fg("accent", rest) + activeBadge + t.fg("accent", hitBadge)
+    : head + statusCell(s, t) + rest + activeBadge + hitBadge;
   const snip = hasBody ? analysis!.snip : undefined;
   const l2 = s.pending
     ? `  ${msg("loadingSession")}`

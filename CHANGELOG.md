@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The list marks sessions written in the last 10 minutes with a green `●` after the directory, so a session another Pi is working in right now stands out before you resume it and branch the work in two. It is a recency hint, not a record of which Pi has a session open — the marker reads the file's mtime and nothing on disk tracks the holder. The mtime comes from when `/peek` opened, and the dot is recalculated on each repaint, so a session that becomes active later is marked the next time the picker opens; the dot also ages out after 10 minutes of idle time.
 - Right-click a session (or press `Ctrl+Enter`) to open a context menu: open, fork, rename, pin / unpin, copy the file path, delete. The menu opens at the pointer and flips up / left when the bottom or right edge is close, so it always stays on screen inside the list pane. `↑` `↓` pick an item, `Enter` runs it, `Esc` or any other key closes; clicking an item runs it, clicking outside closes without running anything.
 - Pin a session from the list with `Ctrl+W` or the menu. It writes the same `pi-web:pin` record Pi Web's `/pin` uses, so the state is shared both ways. Pinned sessions show `📌` in the age column, `✅` when pinned and finished and `📎` when pinned but aborted, so the status icon is not lost. Unpinning is instant, and a failed write leaves the session unchanged with a hint.
 - `Ctrl+Y` copies the selected session's full file path to the clipboard.

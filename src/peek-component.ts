@@ -66,6 +66,8 @@ export class PeekComponent implements Component, Focusable {
   private mode: "search" | "rename" | "confirmDelete" = "search";
   private busy = false; // 删除 / 重命名的异步回调还没回来：期间不能再删、改名、进入或分叉，免得对同一个文件动两次
   private renameInput: Input;
+  /** 行里的相对时间和"最近写过"的绿点都按这个时钟算；测试里换掉就能控时间 */
+  now: () => number = Date.now;
   private cachedWidth = -1;
   private cachedLines: string[] = [];
   private layout = { lw: 0, rw: 0, H: 0 }; // 最近一次 render 的分栏尺寸，鼠标定位用
@@ -780,7 +782,7 @@ export class PeekComponent implements Component, Focusable {
     const { rt, hasBody } = this.listTerms();
     return selectionText(sel, lw, (row) => {
       const s = this.filtered[row >> 1];
-      return s && listRows(s, (row >> 1) === this.selected, lw, rt, hasBody, this.theme, undefined, this.sort, Date.now())[row & 1];
+      return s && listRows(s, (row >> 1) === this.selected, lw, rt, hasBody, this.theme, undefined, this.sort, this.now())[row & 1];
     });
   }
 
@@ -894,7 +896,7 @@ export class PeekComponent implements Component, Focusable {
       this.followSel = false;
     }
     this.listOffset = Math.min(this.listOffset, Math.max(0, this.filtered.length - visible));
-    const leftRows = buildList(this.filtered, this.selected, this.listOffset, H, lw, rt, hasBody, t, this.listCache, this.sort, Date.now());
+    const leftRows = buildList(this.filtered, this.selected, this.listOffset, H, lw, rt, hasBody, t, this.listCache, this.sort, this.now());
 
     const maxOff = Math.max(0, this.previewLines.length - H);
     if (this.previewOffset > maxOff) this.previewOffset = maxOff;
