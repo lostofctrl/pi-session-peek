@@ -24,6 +24,7 @@
 - `Ctrl+T` 显示 AI 实际做了什么：每次工具调用在对应回复下面占一行灰字（`⚙ bash  git status`、`⚙ edit  src/query.ts`）。默认关闭。
 - `Enter` 进入会话，`Ctrl+O` 分叉成新会话，`Ctrl+R` 重命名，`Ctrl+D` 删除；`Ctrl+W` 置顶（写的是 Pi Web `/pin` 用的那条 `pi-web:pin` 记录，两边状态互通），`Ctrl+Y` 复制会话文件路径。
 - 预览头部显示首条和最近一条用户提问，不用滚就能看清这个会话在聊什么。
+- 技能调用显示成 `/skill:name`，预览正文和上面那两行提问都是，技能后面你自己写的话原样留着。pi 会把整个 SKILL.md 塞进用户消息，不缩的话一句话 `/skill:tdd` 就能把预览铺满。
 - `Tab` 在当前目录树和全部项目之间切换。
 - `pi --rp` 或 `pi --peek=关键词` 启动时直接打开。
 - 会话文件只解析一次，按修改时间缓存，再次打开不用等。
@@ -160,6 +161,7 @@ pi-session-peek/
 │   ├── selection.ts         # 选区几何：区间、反显、取文字
 │   ├── layout.ts            # 分栏宽度和主体高度
 │   ├── sessions.ts          # 扫描解析会话 JSONL，重命名 / 删除
+│   ├── skill.ts             # 认出用户消息里的 <skill> 块，缩成 /skill:name
 │   ├── query.ts             # 查询解析、匹配、高亮、命中片段
 │   ├── mouse.ts             # 常规（非全屏）模式下的鼠标上报
 │   ├── ansi.ts              # 转义序列分词、SGR 跟踪、输入净化

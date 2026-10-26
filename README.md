@@ -24,6 +24,7 @@ Search your [pi](https://pi.dev) session history by what was actually said, read
 - Shows what the assistant actually did with `Ctrl+T`: one dim line per tool call (`⚙ bash  git status`, `⚙ edit  src/query.ts`) under the reply that made it. Off by default.
 - Resumes with `Enter`, forks into a new session with `Ctrl+O`, renames with `Ctrl+R`, deletes with `Ctrl+D`, pins with `Ctrl+W` (the same `pi-web:pin` record Pi Web's `/pin` writes) and copies the file path with `Ctrl+Y`.
 - The preview header shows the first and latest user prompt, so you can tell what a session is about at a glance.
+- Shows a skill invocation as `/skill:name` instead of the whole skill body, both in the preview and in those first / latest prompt lines; anything you typed after the skill is kept. Pi wraps the skill's entire SKILL.md into the user message, so without this a single `/skill:tdd` would fill the preview.
 - Toggles between the current directory tree and all projects with `Tab`.
 - Starts straight into the picker with `pi --rp` or `pi --peek=<keyword>`.
 - Parses each session file once and caches it by mtime, so reopening is instant.
@@ -174,6 +175,7 @@ pi-session-peek/
 │   ├── selection.ts         # Selection geometry: ranges, inverse-video highlight, text extraction
 │   ├── layout.ts            # Pane widths and body height
 │   ├── sessions.ts          # Scans and parses session JSONL, rename / pin / delete helpers, first and latest prompt
+│   ├── skill.ts             # Recognises pi's <skill> wrapper in a user message, shortens it to /skill:name
 │   ├── query.ts             # Query parsing, matching, highlighting, hit snippets
 │   ├── mouse.ts             # Mouse reporting for pi's regular (non-fullscreen) mode
 │   ├── ansi.ts              # Escape-sequence tokenising, SGR tracking, input sanitising

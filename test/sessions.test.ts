@@ -485,6 +485,34 @@ test("userPrompts: 首条和最近一条用户提问，空白压成单空格并�
   assert.deepEqual(userPrompts(s([{ role: "user", text: "  \n " }, { role: "user", text: "real" }])), { first: "real", last: "real" });
   // 截断长度
   assert.equal(userPrompts(s([{ role: "user", text: "x".repeat(50) }]), 10).first, "x".repeat(10));
+
+  // 技能正文在解析时就缩成 /skill:name 了，这里只剩调用名和用户自己写的话
+  assert.deepEqual(
+    userPrompts(s([
+      { role: "user", text: "/skill:code-review\n\n看看这个分支" },
+      { role: "assistant", text: "a" },
+    ])),
+    { first: "/skill:code-review 看看这个分支", last: "/skill:code-review 看看这个分支" },
+  );
+});
+
+test("scanSessions: 用户消息里的技能正文缩成 /skill:name，技能正文不参与搜索", async () => {
+  const dir2 = join(agentDir, "sessions", "--D--skills--");
+  mkdirSync(dir2, { recursive: true });
+  const raw = `<skill name="code-review" location="/home/u/.pi/agent/skills/code-review/SKILL.md">\nReferences are relative to /home/u/.pi/agent/skills/code-review.\n\nTwo-axis review of the diff.\n</skill>\n\n看看这个分支`;
+  const p = join(dir2, "skill.jsonl");
+  writeFileSync(
+    p,
+    line({ type: "session", version: 3, id: "skill", timestamp: "2026-09-04T00:00:00.000Z", cwd: "D:\\skills" }) +
+      line({ type: "message", id: "s1", parentId: null, timestamp: "2026-09-04T00:00:00.000Z", message: { role: "user", content: [{ type: "text", text: raw }] } }) +
+      line({ type: "message", id: "s2", parentId: "s1", timestamp: "2026-09-04T00:00:00.000Z", message: { role: "assistant", content: [{ type: "text", text: "好" }] } }),
+  );
+  const s = (await scanSessions(dir2))[0];
+  assert.equal(s.msgs[0].text, "/skill:code-review\n\n看看这个分支", "正文整段缩掉，用户自己写的话留着");
+  assert.deepEqual(userPrompts(s), { first: "/skill:code-review 看看这个分支", last: "/skill:code-review 看看这个分支" });
+  assert.ok(!hits(s, "Two-axis review"), "技能正文不再命中搜索");
+  assert.ok(hits(s, "看看这个分支"), "用户自己写的话照样能搜到");
+  rmSync(dir2, { recursive: true, force: true });
 });
 
 test("pinSession: 追加 pi-web:pin 记录，parentId 是最后一条记录，能跳过写了一半的末行", async () => {

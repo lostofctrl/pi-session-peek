@@ -4,6 +4,7 @@ import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { sanitizeText } from "./ansi.ts";
+import { compactSkillBlock } from "./skill.ts";
 import { normPath } from "./text.ts";
 
 // 读 ~/.pi/agent/sessions 下的会话 JSONL，按 mtime 缓存；重命名和删除也在这里。
@@ -209,7 +210,9 @@ function parseSession(path: string, raw: string, mtime: number, size: number): P
       }
       tailRole = role;
       tailStop = role === "assistant" ? o.message?.stopReason : undefined;
-      const text = extractText(o.message?.content).trim();
+      const raw = extractText(o.message?.content).trim();
+      // 技能正文在这里就缩掉：预览、首条 / 最近提问、搜索都只看 /skill:name 和用户自己写的话
+      const text = role === "user" ? compactSkillBlock(raw) : raw;
       const tools = role === "assistant" ? extractTools(o.message.content) : [];
       // 只有工具调用的 AI 轮次也留着，否则预览里"我来看看"直接跳到结论，中间做了什么全没了
       if (tools.length) msgs.push({ role, text, tools });

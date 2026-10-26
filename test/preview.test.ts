@@ -81,3 +81,35 @@ test("buildPreview：头部有首条和最近一条用户提问，滚到哪儿�
   const long = buildPreview(sess(["字".repeat(400), "答"]), rt(""), 40, false, theme, mdTheme, cache);
   for (const l of long.lines) assert.ok(visibleWidth(strip(l)) <= 40);
 });
+
+test("buildPreview：技能消息（真文件解析过来的）只显示 /skill:name，技能正文不进预览也不进头部提问", async () => {
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { loadSession } = await import("../src/sessions.ts");
+  const dir = mkdtempSync(join(tmpdir(), "peek-skill-"));
+  const p = join(dir, "s.jsonl");
+  const line = (o: unknown) => JSON.stringify(o) + "\n";
+  const body = "References are relative to /skills/tdd.\n\nRED first. Write the failing test before the code.";
+  writeFileSync(
+    p,
+    line({ type: "session", version: 3, id: "s", timestamp: "2026-09-01T00:00:00.000Z", cwd: "D:/proj" }) +
+      line({
+        type: "message", id: "a", parentId: null, timestamp: "2026-09-01T00:00:00.000Z",
+        message: { role: "user", content: [{ type: "text", text: `<skill name="tdd" location="/skills/tdd/SKILL.md">\n${body}\n</skill>\n\n给登录加个测试` }] },
+      }) +
+      line({ type: "message", id: "b", parentId: "a", timestamp: "2026-09-01T00:00:01.000Z", message: { role: "assistant", content: [{ type: "text", text: "好" }] } }),
+  );
+  try {
+    const s = (await loadSession(p))!;
+    const cache: RenderCache = new WeakMap();
+    const out = buildPreview(s, rt(""), 60, false, theme, mdTheme, cache);
+    const text = out.lines.map(strip).join("\n");
+    assert.ok(text.includes("/skill:tdd"), "调用名留着");
+    assert.ok(text.includes("给登录加个测试"), "用户自己写的那句留着");
+    assert.ok(!text.includes("RED first"), "技能正文不显示");
+    assert.ok(out.lines.map(strip).some((l) => l.startsWith("首条提问 /skill:tdd 给登录加个测试")), "头部提问也只有调用名");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
