@@ -20,6 +20,10 @@ export interface PeekMsg {
   tools?: PeekTool[]; // 这条消息里的工具调用，没有就不带这个键。不进搜索索引
 }
 
+/** 会话收尾状态：done = 最后一轮 AI 已经答完（settled），aborted = 被中断或报错。
+ * 还在跑（末条 assistant 的 stopReason 是 toolUse）或最后一句是用户 / 工具结果的，都不给状态 */
+export type PeekStatus = "done" | "aborted";
+
 export interface PeekSession {
   path: string;
   cwd: string;
@@ -31,6 +35,9 @@ export interface PeekSession {
   size: number; // 和 mtime 一起当缓存键：mtime 粒度粗的文件系统上连续两次写入可能同一个 mtime
   pending?: boolean; // 懒加载占位：文件已列出但还没解析，除了 path / mtime / size 都还是空
   pinned?: boolean; // pi-web 的 /pin 状态（最后一条 pi-web:pin 记录）；没写过就是 undefined
+  lastPrompt?: number; // 最后一条 user 消息的时间（毫秒），排序用；没有用户消息就没有这个键
+  status?: PeekStatus; // 末轮收尾状态，见 PeekStatus
+  draft?: boolean; // pi-web 的草稿：有 draft-session 记录且之后 AI 没答过（或老式的 "Draft: " 名字且从没答过）
 }
 
 /** 只 stat 过的会话文件，按 mtime 倒序。不读内容，/peek 先用它把列表画出来 */
@@ -120,12 +127,38 @@ function extractTools(content: unknown): PeekTool[] {
     .map((c: any) => ({ name: c.name, summary: toolSummary(c.arguments) }));
 }
 
+/** 列表排序方式：最近提问（末条用户消息）或创建时间（会话头） */
+export type SortMode = "prompt" | "created";
+
+/** 排序 / 列表里显示的“时间”（毫秒）：创建时间看会话头，最近提问看末条用户消息，都没有就退到最后修改 */
+export function sessionStamp(s: PeekSession, mode: SortMode): number {
+  if (mode === "created") {
+    const t = Date.parse(s.time);
+    return Number.isNaN(t) ? s.mtime : t;
+  }
+  return s.lastPrompt ?? s.mtime;
+}
+
+/** 按时间倒序排，同一时刻再按 mtime 倒序，保证顺序稳定 */
+export function sortSessions(list: readonly PeekSession[], mode: SortMode): PeekSession[] {
+  const stamps = new Map<PeekSession, number>();
+  for (const s of list) stamps.set(s, sessionStamp(s, mode));
+  return [...list].sort((a, b) => stamps.get(b)! - stamps.get(a)! || b.mtime - a.mtime);
+}
+
 function parseSession(path: string, raw: string, mtime: number, size: number): PeekSession | null {
   let cwd = "";
   let time = "";
   let name = "";
   let pinned: boolean | undefined;
   const msgs: PeekMsg[] = [];
+  let lastPrompt: number | undefined;
+  let draftMarker = false;
+  let assistantAfterDraft = false;
+  let anyAssistant = false;
+  // 末条消息的角色和它后面是否又来了新消息：状态只看最后一轮有没有答完
+  let tailRole: "user" | "assistant" | "toolResult" | undefined;
+  let tailStop: string | undefined;
 
   // Avoid allocating an array of every JSONL line, including large ignored tool results.
   let start = 0;
@@ -146,12 +179,20 @@ function parseSession(path: string, raw: string, mtime: number, size: number): P
         if (typeof o.name === "string") name = sanitizeText(o.name).trim(); // 空名字是显式清掉
         continue;
       }
+      // 工具结果行只用来判断“最后一轮还在跑”，内容不读也不解析
+      if (line.includes('"type":"message"') && line.includes('"role":"toolResult"')) {
+        tailRole = "toolResult";
+        tailStop = undefined;
+        continue;
+      }
       // 先用子串粗筛，省掉大部分行的 JSON.parse
       if (!line.includes('"role":"user"') && !line.includes('"role":"assistant"')) {
-        // pi-web 的置顶标记是 custom 记录，不在正文里；最后一条生效，和 pi-web 的读法一致
-        if (line.includes("pi-web:pin")) {
+        // pi-web 的置顶 / 草稿标记是 custom 记录，不在正文里；置顶最后一条生效，和 pi-web 的读法一致
+        if (line.includes("pi-web:pin") || line.includes('"draft-session"')) {
           const o = JSON.parse(line);
           if (o.type === "custom" && o.customType === "pi-web:pin") pinned = o.data?.pinned === true;
+          // 草稿记录之后 AI 一开口就不是草稿了（pi-web 的 isParkedDraft；它还会忽略 clarify 那一轮，这里不管）
+          else if (o.type === "custom" && o.customType === "draft-session") draftMarker = true;
         }
         continue;
       }
@@ -159,6 +200,15 @@ function parseSession(path: string, raw: string, mtime: number, size: number): P
       if (o.type !== "message") continue;
       const role = o.message?.role;
       if (role !== "user" && role !== "assistant") continue;
+      // 消息自己的 timestamp 是毫秒，记录上的 timestamp 是 ISO，两种都见得到
+      const ts = typeof o.message?.timestamp === "number" ? o.message.timestamp : Date.parse(o.timestamp);
+      if (role === "user" && !Number.isNaN(ts)) lastPrompt = ts;
+      if (role === "assistant") {
+        anyAssistant = true;
+        if (draftMarker) assistantAfterDraft = true;
+      }
+      tailRole = role;
+      tailStop = role === "assistant" ? o.message?.stopReason : undefined;
       const text = extractText(o.message?.content).trim();
       const tools = role === "assistant" ? extractTools(o.message.content) : [];
       // 只有工具调用的 AI 轮次也留着，否则预览里"我来看看"直接跳到结论，中间做了什么全没了
@@ -172,6 +222,13 @@ function parseSession(path: string, raw: string, mtime: number, size: number): P
   const firstText = msgs.find((m) => m.text);
   if (!firstText) return null;
 
+  // 末轮是 AI 才算收尾：toolUse 说明还要接着跑，user / toolResult 说明这轮还没答
+  let status: PeekStatus | undefined;
+  if (tailRole === "assistant" && tailStop !== "toolUse") {
+    status = tailStop === "aborted" || tailStop === "error" ? "aborted" : "done";
+  }
+  const draft = draftMarker ? !assistantAfterDraft : /^Draft:\s/.test(name) && !anyAssistant;
+
   return {
     path,
     cwd,
@@ -182,6 +239,9 @@ function parseSession(path: string, raw: string, mtime: number, size: number): P
     size,
     first: firstText.text.replace(/\s+/g, " ").slice(0, 80),
     ...(pinned === undefined ? {} : { pinned }),
+    ...(lastPrompt === undefined ? {} : { lastPrompt }),
+    ...(status === undefined ? {} : { status }),
+    ...(draft ? { draft: true } : {}),
   };
 }
 

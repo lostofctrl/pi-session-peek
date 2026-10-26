@@ -2,7 +2,11 @@
 
 ## Unreleased
 
-- Search: `pin:true` / `pin:false` filter by Pi Web's `/pin` state, read from the last `pi-web:pin` record in the session file; sessions never pinned count as unpinned. Negation works like other filters (`-pin:true`), and the state shows up as soon as the session is parsed. `Alt+P` toggles a pinned-only view without editing the query; the header shows `📌 pinned` while it is on.
+- The list shows relative ages (`now`, `2h`, `3d`, `1w`, `4mo`, `2y`) instead of fixed timestamps, plus a status icon: `✓` when the last reply finished and `⏹` when it was aborted or failed. Unfinished tails (tools still running, or the last message is yours) get no icon. Sessions are now sorted by last prompt; `Alt+S` switches to creation time, and the age column follows the chosen order.
+- Search: `draft:true` / `draft:false` filter Pi Web drafts (a `draft-session` marker with no assistant reply after it; a legacy `Draft: …` name with no reply counts too). `Alt+D` toggles a drafts-only view below the query, the same way `Alt+P` does for pins.
+- The header is now a row of four switches — scope, sort, pinned, drafts — and each is clickable, not just the scope label. The `📌 pinned` badge became the `pinned: only` switch value.
+
+- Search: `pin:true` / `pin:false` filter by Pi Web's `/pin` state, read from the last `pi-web:pin` record in the session file; sessions never pinned count as unpinned. Negation works like other filters (`-pin:true`), and the state shows up as soon as the session is parsed. `Alt+P` toggles a pinned-only view without editing the query; the header switch shows `pinned: only` while it is on.
 - Local performance customization: `/peek` now paints the list immediately from file metadata and parses sessions in the background, so opening no longer waits for the whole history. Placeholder rows show `Loading session…` and are replaced in batched updates without moving the selection; the picker is fully searchable as soon as files are parsed, and all history is still loaded. Plus: reuse per-picker list body analysis across repaints, cache unchanged empty parses by mtime and size, and parse JSONL without a whole-file line array. Search semantics and full-history indexing are unchanged.
 
 ## 0.5.2

@@ -17,7 +17,8 @@ import { buildList, followSelection, listRows, visibleItems, type ListCache } fr
 import { buildPreview, initialOffset, nextMatchTarget, type RenderCache } from "./preview.ts";
 import { matchesSession, parseQuery, roleTerms, type ParsedQuery, type RoleTerms } from "./query.ts";
 import { bounds, highlightColumns, rowColumns, selectionText, type Selection } from "./selection.ts";
-import type { PeekSession } from "./sessions.ts";
+import type { PeekSession, SortMode } from "./sessions.ts";
+import { sortSessions } from "./sessions.ts";
 import { fmtTime, normPath, padEndVisible } from "./text.ts";
 import type { PeekTheme } from "./theme.ts";
 
@@ -27,6 +28,9 @@ import type { PeekTheme } from "./theme.ts";
 const WHEEL_LINES = 3; // 滚轮每格滚几行预览，和 Shift+↑↓ 一样
 const WHEEL_ITEMS = 1; // 滚轮每格滚几个列表项（每项两行）。只滚视图，不换选中项，像浏览器的滚动条
 const HINT_MS = 1500; // 底部"已复制"提示停留时间
+
+// 头部四个可点 / 可按键切换的开关
+type HeadAction = "scope" | "sort" | "pin" | "draft";
 
 export class PeekComponent implements Component, Focusable {
   private input: Input;
@@ -43,9 +47,13 @@ export class PeekComponent implements Component, Focusable {
   private listCache: ListCache = new WeakMap();
   private cachedListTerms?: { query: string; rt: RoleTerms; hasBody: boolean };
   private byPath = new Map<string, PeekSession>(); // 路径 → 列表项；懒加载时按路径原地填充占位项
-  private scopeAuto = false;
+  private scopeAuto = false; // 还没解析出 cwd 时先按全局列出，第一批当前目录树的会话到了再自动切过去
   // Alt+P：只看 Pi Web 里 /pin 过的会话；和输入框里的 pin: 条件是 AND
-  private pinOnly = false; // 还没解析出 cwd 时先按全局列出，第一批当前目录树的会话到了再自动切过去
+  private pinOnly = false;
+  // Alt+D：只看 pi-web 的草稿；和输入框里的 draft: 条件是 AND
+  private draftOnly = false;
+  // Alt+S：列表按什么时间排。默认最近提问，切到创建时间
+  private sort: SortMode = "prompt";
   private rendered: RenderCache = new WeakMap(); // 每条消息渲染好的行，按宽度缓存
   // 三个互斥的输入状态：搜索（默认）、Ctrl+R 之后在输入新名字、Ctrl+D 之后等待确认。改名和确认只从搜索进入、退回搜索
   private mode: "search" | "rename" | "confirmDelete" = "search";
@@ -54,7 +62,8 @@ export class PeekComponent implements Component, Focusable {
   private cachedWidth = -1;
   private cachedLines: string[] = [];
   private layout = { lw: 0, rw: 0, H: 0 }; // 最近一次 render 的分栏尺寸，鼠标定位用
-  private scopeSpan: [number, number] = [0, 0]; // 头部"范围"字样占的列区间，点击切换范围
+  // 头部可点的几段（范围 / 排序 / 置顶 / 草稿）占的列区间，点击切换。范围之前是标题，所以空白处点不动
+  private headHits: { from: number; to: number; act: HeadAction }[] = [];
   // 拖选状态机。分栏尺寸和滚动位置惰性从组件读，自动滚动时把新的预览偏移写回来
   private drag = new DragSelect({
     geometry: () => ({ ...this.layout, listOffset: this.listOffset, previewOffset: this.previewOffset }),
@@ -133,14 +142,17 @@ export class PeekComponent implements Component, Focusable {
     const q = this.query();
     const { terms, since } = q;
     const pinned = this.pinOnly ? [...q.pinned, true] : q.pinned;
+    const drafts = this.draftOnly ? [...q.drafts, true] : q.drafts;
     let out = this.all;
     if (this.scope === "current") out = out.filter((s) => this.inCurrentTree(s));
     if (since) out = out.filter((s) => s.mtime >= since);
-    // 还没解析的会话不知道内容和置顶状态，有过滤条件时先不列；后台解析完会自动补进来
-    if (terms.length || pinned.length) out = out.filter((s) => !s.pending && matchesSession(s, terms, pinned));
-    this.filtered = out;
-    const idx = prev ? out.indexOf(prev) : -1;
-    this.selected = idx >= 0 ? idx : keepSelection ? Math.min(this.selected, Math.max(0, out.length - 1)) : 0;
+    // 还没解析的会话不知道内容、置顶和草稿状态，有过滤条件时先不列；后台解析完会自动补进来
+    if (terms.length || pinned.length || drafts.length) {
+      out = out.filter((s) => !s.pending && matchesSession(s, terms, pinned, drafts));
+    }
+    this.filtered = sortSessions(out, this.sort);
+    const idx = prev ? this.filtered.indexOf(prev) : -1;
+    this.selected = idx >= 0 ? idx : keepSelection ? Math.min(this.selected, Math.max(0, this.filtered.length - 1)) : 0;
     if (!keepSelection) this.listOffset = 0;
     this.followSel = true;
     // 后台填充时会一批批调用；选中项没变就别重建预览，否则滚动位置一直被打回底部
@@ -316,10 +328,7 @@ export class PeekComponent implements Component, Focusable {
       return;
     }
     if (matchesKey(data, Key.tab)) {
-      this.scope = this.scope === "all" ? "current" : "all";
-      this.scopeAuto = false;
-      this.refilter();
-      this.invalidate();
+      this.headAction("scope");
       return;
     }
     if (matchesKey(data, Key.up)) {
@@ -359,9 +368,15 @@ export class PeekComponent implements Component, Focusable {
       return;
     }
     if (matchesKey(data, Key.alt("p"))) {
-      this.pinOnly = !this.pinOnly;
-      this.refilter();
-      this.invalidate();
+      this.headAction("pin");
+      return;
+    }
+    if (matchesKey(data, Key.alt("d"))) {
+      this.headAction("draft");
+      return;
+    }
+    if (matchesKey(data, Key.alt("s"))) {
+      this.headAction("sort");
       return;
     }
     if (matchesKey(data, Key.ctrl("t"))) {
@@ -475,10 +490,9 @@ export class PeekComponent implements Component, Focusable {
       this.input.handleMouse({ ...ev, y: 0 });
       handled = changed = true;
     } else if (ev.y === 0) {
-      if (ev.x >= this.scopeSpan[0] && ev.x < this.scopeSpan[1]) {
-        this.scope = this.scope === "all" ? "current" : "all";
-        this.scopeAuto = false;
-        this.refilter();
+      const hit = this.headHits.find((h) => ev.x >= h.from && ev.x < h.to);
+      if (hit) {
+        this.headAction(hit.act);
         handled = changed = true;
       }
     } else {
@@ -498,6 +512,22 @@ export class PeekComponent implements Component, Focusable {
     return inBody ? { handled: true, capture: true, render: changed } : { handled: true, render: changed };
   }
 
+  // 头部四个开关：点头部的字样、Tab / Alt+S / Alt+P / Alt+D 都走这里
+  private headAction(act: HeadAction): void {
+    if (act === "scope") {
+      this.scope = this.scope === "all" ? "current" : "all";
+      this.scopeAuto = false;
+    } else if (act === "sort") {
+      this.sort = this.sort === "prompt" ? "created" : "prompt";
+    } else if (act === "pin") {
+      this.pinOnly = !this.pinOnly;
+    } else {
+      this.draftOnly = !this.draftOnly;
+    }
+    this.refilter();
+    this.invalidate();
+  }
+
   // 鼠标滚轮 / 按下时退出删除确认（只退出确认，改名状态不动）。返回有没有退出
   private cancelConfirm(): boolean {
     if (this.mode !== "confirmDelete") return false;
@@ -512,7 +542,7 @@ export class PeekComponent implements Component, Focusable {
     const { rt, hasBody } = this.listTerms();
     return selectionText(sel, lw, (row) => {
       const s = this.filtered[row >> 1];
-      return s && listRows(s, (row >> 1) === this.selected, lw, rt, hasBody, this.theme)[row & 1];
+      return s && listRows(s, (row >> 1) === this.selected, lw, rt, hasBody, this.theme, undefined, this.sort, Date.now())[row & 1];
     });
   }
 
@@ -590,21 +620,27 @@ export class PeekComponent implements Component, Focusable {
 
     const out: string[] = [];
 
-    // 头部：标题、范围、时间过滤、匹配数，然后是搜索框
+    // 头部：标题，然后是范围 / 排序 / 置顶 / 草稿四个可点的开关，最后是时间过滤、匹配数
     const scopeLabel = this.scope === "all" ? msg("scopeAll") : msg("scopeCurrent");
     const { sinceLabel } = this.query();
-    // 「范围[Tab]: 当前目录树」整段都能点
-    const scopeStart = visibleWidth(msg("title"));
-    this.scopeSpan = [scopeStart, scopeStart + visibleWidth(msg("scopeLabel") + scopeLabel)];
+    let head = t.fg("accent", t.bold(msg("title")));
+    const hits: typeof this.headHits = [];
+    // 「范围[Tab]: 当前目录树」整段都能点；(前) 后的列号按可见宽度算，中文和 emoji 都不跑偏
+    const chip = (label: string, value: string, act: HeadAction) => {
+      const from = visibleWidth(head);
+      head += t.fg("dim", label) + t.fg("warning", value);
+      hits.push({ from, to: visibleWidth(head), act });
+    };
+    chip(msg("scopeLabel"), scopeLabel, "scope");
+    chip(msg("sortLabel"), this.sort === "prompt" ? msg("sortPrompt") : msg("sortCreated"), "sort");
+    chip(msg("pinLabel"), this.pinOnly ? msg("pinOnly") : msg("pinAll"), "pin");
+    chip(msg("draftLabel"), this.draftOnly ? msg("draftOnly") : msg("draftAll"), "draft");
+    this.headHits = hits;
     let pending = 0;
     for (const s of this.all) if (s.pending) pending++;
-    const head =
-      t.fg("accent", t.bold(msg("title"))) +
-      t.fg("dim", msg("scopeLabel")) +
-      t.fg("warning", scopeLabel) +
+    head +=
       (sinceLabel ? t.fg("dim", msg("timeLabel")) + t.fg("warning", sinceLabel) : "") +
       t.fg("dim", msg("matchCount", { n: this.filtered.length, total: this.all.length })) +
-      (this.pinOnly ? t.fg("warning", msg("pinOnBadge")) : "") +
       (pending ? t.fg("dim", msg("loading", { n: pending })) : "");
     out.push(truncateToWidth(head, width));
     out.push(this.input.render(width)[0] ?? "");
@@ -620,7 +656,7 @@ export class PeekComponent implements Component, Focusable {
       this.followSel = false;
     }
     this.listOffset = Math.min(this.listOffset, Math.max(0, this.filtered.length - visible));
-    const leftRows = buildList(this.filtered, this.selected, this.listOffset, H, lw, rt, hasBody, t, this.listCache);
+    const leftRows = buildList(this.filtered, this.selected, this.listOffset, H, lw, rt, hasBody, t, this.listCache, this.sort, Date.now());
 
     const maxOff = Math.max(0, this.previewLines.length - H);
     if (this.previewOffset > maxOff) this.previewOffset = maxOff;

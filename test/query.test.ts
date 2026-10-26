@@ -66,7 +66,7 @@ test("parseQuery: @0d 不生效，@abc 当普通关键词", () => {
 });
 
 test("parseQuery: 空字符串", () => {
-  assert.deepEqual(parseQuery(""), { terms: [], since: 0, sinceLabel: "", pinned: [] });
+  assert.deepEqual(parseQuery(""), { terms: [], since: 0, sinceLabel: "", pinned: [], drafts: [] });
   assert.deepEqual(parseQuery("   ").terms, []);
 });
 
@@ -275,6 +275,27 @@ test("snippet: 没有消息命中返回 undefined；排除词和 name: 不产生
   assert.equal(snippet([{ role: "user", text: "nothing" }], roleTerms(terms("zzz")), 30), undefined);
   assert.equal(snippet([{ role: "user", text: "nothing" }], roleTerms([]), 30), undefined);
   assert.equal(snippet([{ role: "user", text: "nothing" }], roleTerms(terms("-zzz name:nothing")), 30), undefined);
+});
+
+test("draft: 按 pi-web 的草稿状态过滤，- 取反，和普通词是 AND", () => {
+  const draft = { ...sess(["parked"]), draft: true };
+  const normal = sess(["done"]);
+  const q = parseQuery;
+  assert.deepEqual(q("draft:true").drafts, [true]);
+  assert.deepEqual(q("drafts:FALSE").drafts, [false]);
+  assert.deepEqual(q("-draft:true").drafts, [false]);
+  assert.deepEqual(q("draft:1 draft:1").drafts, [true]);
+  assert.deepEqual(q("x").drafts, []);
+  assert.deepEqual(q('"draft:true"').drafts, []); // 引号里是字面词
+
+  assert.ok(matchesSession(draft, [], [], q("draft:true").drafts));
+  assert.ok(!matchesSession(normal, [], [], q("draft:true").drafts));
+  assert.ok(matchesSession(normal, [], [], q("draft:false").drafts));
+  assert.ok(!matchesSession({ ...draft, draft: undefined }, [], [], q("draft:true").drafts));
+  // 和置顶各管各的，两条约束同时生效
+  assert.ok(!matchesSession({ ...draft, pinned: true }, [], q("pin:false").pinned, q("draft:true").drafts));
+  assert.ok(matchesSession(draft, q("parked").terms, [], q("draft:true").drafts));
+  assert.ok(!matchesSession(draft, q("missing").terms, [], q("draft:true").drafts));
 });
 
 test("pinned: 按 pi-web 的 /pin 状态过滤，- 取反，和普通词是 AND", () => {

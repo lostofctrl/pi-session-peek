@@ -1,8 +1,8 @@
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import { msg } from "./i18n.ts";
 import { anyMatch, highlight, snippet, type RoleTerms, type Snippet } from "./query.ts";
-import type { PeekSession } from "./sessions.ts";
-import { fmtTime, padEndVisible } from "./text.ts";
+import { sessionStamp, type PeekSession, type SortMode } from "./sessions.ts";
+import { fmtAgoCell, padEndVisible } from "./text.ts";
 import type { PeekTheme } from "./theme.ts";
 
 // 左栏：每个会话两行，全是纯函数。滚动偏移由组件持有，这里只算"选中项要留在视口里时偏移该是多少"
@@ -20,9 +20,26 @@ export function followSelection(selected: number, offset: number, visible: numbe
 // Per-picker, one query/width revision per session; selection styling stays uncached.
 export type ListCache = WeakMap<PeekSession, { rt: RoleTerms; width: number; hits: number; snip: Snippet | undefined }>;
 
-// 一个会话的两行：时间 + 目录（有正文关键词时加命中数），首条消息或命中片段
-export function listRows(s: PeekSession, sel: boolean, lw: number, rt: RoleTerms, hasBody: boolean, t: PeekTheme, cache?: ListCache): [string, string] {
-  const time = fmtTime(s.time);
+// 一个会话的两行：状态图标 + 相对时间 + 目录（有正文关键词时加命中数），首条消息或命中片段
+// 状态图标：✓ 已答完（settled），⏹ 中断 / 报错；还在跑或没有 AI 回复就不画，占位保持对齐
+export function statusCell(s: PeekSession, t: PeekTheme): string {
+  if (!s.status) return "  ";
+  const icon = s.status === "done" ? t.fg("success", "✓") : t.fg("warning", "⏹");
+  return padEndVisible(icon, 2);
+}
+
+export function listRows(
+  s: PeekSession,
+  sel: boolean,
+  lw: number,
+  rt: RoleTerms,
+  hasBody: boolean,
+  t: PeekTheme,
+  cache?: ListCache,
+  sort: SortMode = "prompt",
+  now: number = Date.now(),
+): [string, string] {
+  const age = fmtAgoCell(sessionStamp(s, sort), now);
   const cwdTail = s.cwd.replace(/\\/g, "/").split("/").slice(-2).join("/");
   let analysis = hasBody ? cache?.get(s) : undefined;
   if (hasBody && (!analysis || analysis.rt !== rt || analysis.width !== lw)) {
@@ -34,7 +51,9 @@ export function listRows(s: PeekSession, sel: boolean, lw: number, rt: RoleTerms
     cache?.set(s, analysis);
   }
   const hitBadge = hasBody ? ` ·${analysis!.hits}` : "";
-  const l1 = `${sel ? "›" : " "} ${time} ${cwdTail}${hitBadge}`;
+  const head = `${sel ? "›" : " "} `;
+  const rest = `${age} ${cwdTail}${hitBadge}`;
+  const l1 = sel ? t.fg("accent", head) + statusCell(s, t) + t.fg("accent", rest) : head + statusCell(s, t) + rest;
   const snip = hasBody ? analysis!.snip : undefined;
   const l2 = s.pending
     ? `  ${msg("loadingSession")}`
@@ -43,7 +62,7 @@ export function listRows(s: PeekSession, sel: boolean, lw: number, rt: RoleTerms
       : `  ${s.first}${s.name ? `  [${s.name}]` : ""}`;
   if (sel) {
     return [
-      t.bg("selectedBg", padEndVisible(t.fg("accent", truncateToWidth(l1, lw)), lw)),
+      t.bg("selectedBg", padEndVisible(truncateToWidth(l1, lw), lw)),
       t.bg("selectedBg", padEndVisible(truncateToWidth(l2, lw), lw)),
     ];
   }
@@ -61,6 +80,8 @@ export function buildList(
   hasBody: boolean,
   t: PeekTheme,
   cache?: ListCache,
+  sort: SortMode = "prompt",
+  now: number = Date.now(),
 ): string[] {
   const rows: string[] = [];
   for (let i = 0, n = visibleItems(height); i < n; i++) {
@@ -70,7 +91,7 @@ export function buildList(
       rows.push(" ".repeat(lw), " ".repeat(lw));
       continue;
     }
-    rows.push(...listRows(s, idx === selected, lw, rt, hasBody, t, cache));
+    rows.push(...listRows(s, idx === selected, lw, rt, hasBody, t, cache, sort, now));
   }
   // 每项两行，height 是奇数时会少一行，补空行，否则最后一行右栏会顶到左边
   while (rows.length < height) rows.push(" ".repeat(lw));

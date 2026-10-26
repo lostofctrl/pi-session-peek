@@ -10,8 +10,14 @@ import { strip, theme } from "./helpers.ts";
 
 const NO_TERMS = { rt: roleTerms([]), hasBody: false };
 
+const TIME = new Date(2020, 0, 2, 3, 4);
+const NOW = new Date(2020, 0, 4, 3, 4).getTime(); // 比 TIME 晚两天，相对时间正好是 2d
+
 function sess(cwd: string, first: string, name = ""): PeekSession {
-  return { path: `${cwd}/x.jsonl`, cwd, time: new Date(2020, 0, 2, 3, 4).toISOString(), name, first, msgs: [{ role: "user", text: first }], mtime: 0, size: 0 };
+  return {
+    path: `${cwd}/x.jsonl`, cwd, time: TIME.toISOString(), name, first,
+    msgs: [{ role: "user", text: first }], mtime: TIME.getTime(), size: 0, lastPrompt: TIME.getTime(),
+  };
 }
 
 test("paneWidths：左栏 40% 夹在 26..56，右栏拿剩下的至少 20", () => {
@@ -45,13 +51,32 @@ test("visibleItems / followSelection：每项两行；选中项跑出视口才�
   assert.equal(followSelection(2, 4, 5), 2); // 出上边，偏移就是选中项
 });
 
-test("listRows：选中行带 › 和背景，第二行是首条消息 + [名字]；时间带年份（不是今年）", () => {
+test("listRows：选中行带 › 和背景，时间显示成相对时间，第二行是首条消息 + [名字]", () => {
   const s = sess("D:/proj/packages/web", "hello there", "nm");
-  const [a, b] = listRows(s, true, 40, NO_TERMS.rt, NO_TERMS.hasBody, theme);
-  assert.equal(strip(a), "› 2020-01-02 03:04 packages/web".padEnd(40));
+  const [a, b] = listRows(s, true, 40, NO_TERMS.rt, NO_TERMS.hasBody, theme, undefined, "prompt", NOW);
+  assert.match(strip(a), /^› +2d packages\/web/);
+  assert.equal(strip(a).length, 40);
   assert.equal(strip(b), "  hello there  [nm]".padEnd(40));
-  const [c] = listRows(s, false, 40, NO_TERMS.rt, NO_TERMS.hasBody, theme);
-  assert.ok(c.startsWith("  2020-01-02"));
+  const [c] = listRows(s, false, 40, NO_TERMS.rt, NO_TERMS.hasBody, theme, undefined, "prompt", NOW);
+  assert.match(strip(c), /^ {6}2d packages\/web/); // 没状态时状态列留空，时间列仍然对齐
+});
+
+test("listRows：状态图标 ✓ 已答完 / ⏹ 中断，没有状态就没有图标", () => {
+  const done = { ...sess("D:/proj", "ok"), status: "done" as const };
+  const aborted = { ...sess("D:/proj", "stopped"), status: "aborted" as const };
+  const running = sess("D:/proj", "still going"); // 末轮还是 toolUse / 用户消息：不给状态
+  const row = (s: PeekSession) => strip(listRows(s, false, 40, NO_TERMS.rt, NO_TERMS.hasBody, theme, undefined, "prompt", NOW)[0]);
+  assert.match(row(done), /^ {2}✓ +2d /);
+  assert.match(row(aborted), /^ {2}⏹ +2d /);
+  assert.doesNotMatch(row(running), /[✓⏹]/);
+});
+
+test("listRows：Alt+S 换排序时，时间列跟着显示创建时间 / 最近提问", () => {
+  const s = sess("D:/proj", "hi");
+  s.lastPrompt = new Date(2020, 0, 4, 3, 4).getTime(); // 提问比创建晚两天
+  const row = (sort: "prompt" | "created") => strip(listRows(s, false, 40, NO_TERMS.rt, NO_TERMS.hasBody, theme, undefined, sort, NOW)[0]);
+  assert.match(row("prompt"), /^ +now D:\/proj/);
+  assert.match(row("created"), /^ +2d D:\/proj/);
 });
 
 test("listRows：有正文关键词时第一行带命中数，第二行是高亮片段", () => {

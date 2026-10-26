@@ -14,8 +14,10 @@ Search your [pi](https://pi.dev) session history by what was actually said, read
 - Renders the conversation with pi's own Markdown renderer, so headings, code blocks with syntax highlighting, tables and lists look the same as in the main transcript.
 - Filters as you type across conversation text and session name. The working directory is searched only with an explicit `dir:`, so a word from a project path does not match every session in that project. Tool call arguments and results are excluded from the search, so a keyword only matches sessions that actually discussed it.
 - Requires every space-separated keyword to match, and shows a snippet around the first hit in the list.
-- Understands `"exact phrases"`, `either|or`, `-exclude`, `name:` / `dir:` / `user:` / `ai:` prefixes, `/regex/`, and `pin:true` / `pin:false` for Pi Web's `/pin` state. `Alt+P` toggles a pinned-only view without touching the typed query.
+- Understands `"exact phrases"`, `either|or`, `-exclude`, `name:` / `dir:` / `user:` / `ai:` prefixes, `/regex/`, `pin:true` / `pin:false` for Pi Web's `/pin` state, and `draft:true` / `draft:false` for its drafts. `Alt+P`, `Alt+D` and `Alt+S` toggle pinned-only, drafts-only and the sort order without touching the typed query.
 - Limits results to recently active sessions with `@7d`, `@24h`, `@2w` or `@1m`.
+- Shows each session's age as relative time (`now`, `2h`, `3d`, `1w`) instead of a fixed timestamp, plus a status icon: `✓` when the last reply finished, `⏹` when it was aborted or failed. Sessions with an unfinished turn (tools still running, or a question waiting for you) get no icon.
+- Sorts newest first by last prompt; `Alt+S` switches to creation time. The header shows which of the two is active.
 - Highlights every hit in the preview and jumps between them with `Ctrl+N` / `Ctrl+P`.
 - Shows what the assistant actually did with `Ctrl+T`: one dim line per tool call (`⚙ bash  git status`, `⚙ edit  src/query.ts`) under the reply that made it. Off by default.
 - Resumes with `Enter`, forks into a new session with `Ctrl+O`, renames with `Ctrl+R`, deletes with `Ctrl+D`.
@@ -36,7 +38,7 @@ This checkout retains the MIT-licensed upstream source from [Jeffropz/pi-session
 
 For this installation, replace `npm:pi-session-peek` in the `packages` list of `~/.pi/agent/settings.json` with `../../pi-plugin/pi-session-peek`, then run `/reload`. Do not load both copies. Restore the npm entry to undo activation.
 
-Verified with `npx tsc --noEmit` and `npm test` (148 tests), the benchmark above, and an isolated Pi 1.4.0 TUI session (`PI_CODING_AGENT_DIR` sandbox with a 300-file copy of the real session directory): `/peek` showed the picker after 63–86 ms, typing a filter updated it, and `Esc` returned to the editor. The background load is still CPU-bound on very large files: a single large JSONL parse can block the event loop for roughly 0.2 s once, so a keystroke at that moment can feel slightly delayed.
+Verified with `npx tsc --noEmit` and `npm test` (163 tests), the benchmark above, and an isolated Pi 1.4.0 TUI session (`PI_CODING_AGENT_DIR` sandbox with a 300-file copy of the real session directory): `/peek` showed the picker after 63–86 ms, typing a filter updated it, and `Esc` returned to the editor. The background load is still CPU-bound on very large files: a single large JSONL parse can block the event loop for roughly 0.2 s once, so a keystroke at that moment can feel slightly delayed.
 
 ## 📦 Install
 
@@ -84,6 +86,8 @@ In TUI mode, run `/peek` and start typing. Press `Enter` on a session to continu
 | `Ctrl+N` `Ctrl+P` | Next / previous hit line outside the current view; the top-right corner shows `hit k/n` |
 | `Ctrl+T` | Show / hide tool calls in the preview. Each call is one line with the tool name and its main argument (command, path, URL, query). Results are never shown. |
 | `Alt+P` | Show only sessions pinned in Pi Web with `/pin`; press again to show all. Stacks with the typed query. |
+| `Alt+D` | Show only Pi Web drafts (a `draft-session` marker the assistant never answered); press again to show all. Stacks with the typed query. |
+| `Alt+S` | Sort by last prompt (default) or by creation time. The list order and the age column both follow it. |
 | `Enter` | Resume the session |
 | `Ctrl+O` | Fork the session and open the fork |
 | `Ctrl+R` | Rename. Writes the same `session_info` entry as `/name`. |
@@ -98,7 +102,7 @@ In TUI mode, run `/peek` and start typing. Press `Enter` on a session to continu
 | Double-click a session | Resume it (same as `Enter`) |
 | Wheel over the list | Scroll the list like a scrollbar; the selection stays where it is. `↑` `↓`, a click or a new filter bring it back into view. |
 | Wheel over the preview | Scroll the preview three lines per notch (`Alt` for five times faster) |
-| Click the scope label in the header | Toggle current directory tree ↔ all projects (same as `Tab`) |
+| Click a switch in the header | Toggle the scope, the sort order, pinned-only or drafts-only (same as `Tab`, `Alt+S`, `Alt+P`, `Alt+D`) |
 | Click the search box or the rename line | Move the cursor |
 | Drag inside a pane | Select text in that pane only. Dragging across the divider or past the edge keeps the selection in the pane where it started, and lines wrap within that pane. |
 | `Ctrl+C` with a selection | Copy it to the clipboard. Nothing is copied on release. Without a selection `Ctrl+C` closes as before; a click anywhere clears the selection. |
@@ -120,11 +124,12 @@ The filter is case-insensitive and matches anywhere in the text. Whitespace sepa
 | `/\bfoo\d+\b/` | JavaScript regular expression, case-insensitive, `^` and `$` match line boundaries. Use `\s` instead of a space. |
 | `@7d` | Sessions active in the last 7 days. Units: `h`, `d`, `w`, `m` (30 days). |
 | `pin:true` | Only sessions pinned in Pi Web with `/pin`. `pin:false` (or `-pin:true`) shows unpinned sessions; a session that was never pinned counts as unpinned. `Alt+P` toggles pinned-only as a separate filter that stacks with the query. |
+| `draft:true` | Only Pi Web drafts: a session with a `draft-session` marker that the assistant never answered. `draft:false` (or `-draft:true`) shows the rest. `Alt+D` toggles drafts-only as a separate filter that stacks with the query. |
 | `-user:"not now" ai:/todo\|fixme/ @2w` | Prefixes stack, and everything combines |
 
 Quotes are the escape hatch: `"-foo"`, `"a|b"`, `"name:x"`, `"pin:true"` and `"/x/"` search for those characters literally. A regex that fails to compile is searched as plain text. Only positive text terms are highlighted in the preview; `name:` / `dir:` and `pin:` terms never touch the conversation, so `name:auth` alone shows the full conversation with no highlights.
 
-The pin state is read from Pi Web's `pi-web:pin` records in the session file; the last record wins, and invalid or missing records count as unpinned. The search index holds user and assistant messages and the session name. The working directory is matched only by `dir:` / `cwd:` terms: with the current-directory scope every session shares the same path prefix, so a plain word from the path would match all of them. The index does not hold tool call arguments or tool results, and the tool lines shown by `Ctrl+T` are never matched or highlighted.
+The pin state is read from Pi Web's `pi-web:pin` records in the session file; the last record wins, and invalid or missing records count as unpinned. The draft state comes from `draft-session` records: a session stays a draft until an assistant message follows the marker, and an old session named `Draft: …` with no assistant reply counts as a draft too. The search index holds user and assistant messages and the session name. The working directory is matched only by `dir:` / `cwd:` terms: with the current-directory scope every session shares the same path prefix, so a plain word from the path would match all of them. The index does not hold tool call arguments or tool results, and the tool lines shown by `Ctrl+T` are never matched or highlighted.
 
 ## 🌐 Language
 

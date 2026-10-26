@@ -11,6 +11,7 @@ setLang("zh");
 
 const tick = (ms = 5) => new Promise((r) => setTimeout(r, ms));
 
+const ALT = (ch: string) => "\x1b" + ch;
 const KEY = { enter: "\r", tab: "\t", up: "\x1b[A", down: "\x1b[B", bs: "\x7f", esc: "\x1b", cc: "\x03", cd: "\x04", cf: "\x06", co: "\x0f", cr: "\x12", ct: "\x14", cu: "\x15", ap: "\x1bp" };
 
 function mk(cwd: string, texts: string[], ageDays: number, name = ""): PeekSession {
@@ -300,7 +301,7 @@ test("焦点跟着活跃的输入框走", () => {
 });
 
 test("预览滚动：Ctrl+U / Ctrl+F，PgUp / PgDn，到边界夹住", () => {
-  const long = mk("D:/proj", Array.from({ length: 60 }, (_, i) => `message number ${i} ${"x".repeat(80)}`), 1);
+  const long = mk("D:/proj", Array.from({ length: 60 }, (_, i) => `message number ${i} ${"x".repeat(80)}`), 999); // 最老，排序后落在最后
   const c = make([long], "D:/proj");
   c.render(120);
   const bottom = c.previewOffset;
@@ -647,7 +648,7 @@ test("鼠标：没画过之前不处理；左栏按下选中，同一项再按�
 });
 
 test("鼠标：左栏滚轮只滚视图，选中项不动并到边界夹住；↑↓ 把选中项带回视野；右栏滚轮滚预览三行一格", () => {
-  const long = mk("D:/proj", Array.from({ length: 60 }, (_, i) => `message number ${i} ${"x".repeat(80)}`), 1);
+  const long = mk("D:/proj", Array.from({ length: 60 }, (_, i) => `message number ${i} ${"x".repeat(80)}`), 999); // 最老，排序后落在最后
   const probe = make([long], "D:/nowhere");
   const visible = visibleItems(probe.bodyHeight()); // 可见项数按当前终端高度现算
   const many = Array.from({ length: visible + 6 }, (_, i) => mk(`D:/dir${i}`, [`item ${i}`], i + 1));
@@ -695,14 +696,13 @@ test("鼠标：点头部的范围字样切换范围，点别处不管；点搜�
   const c = make();
   c.render(120);
   assert.equal(c.scope, "current");
-  const [from, to] = c.scopeSpan;
-  assert.ok(from > 0 && to > from);
-  assert.deepEqual(c.handleMouse(MOUSE("press", from, 0)), { handled: true, render: true });
+  const scope = c.headHits.find((h: any) => h.act === "scope");
+  assert.ok(scope.from > 0 && scope.to > scope.from);
+  assert.deepEqual(c.handleMouse(MOUSE("press", scope.from, 0)), { handled: true, render: true });
   assert.equal(c.scope, "all");
-  c.handleMouse(MOUSE("press", to - 1, 0));
+  c.handleMouse(MOUSE("press", scope.to - 1, 0));
   assert.equal(c.scope, "current");
-  assert.equal(c.handleMouse(MOUSE("press", 0, 0)), undefined);
-  assert.equal(c.handleMouse(MOUSE("press", to, 0)), undefined);
+  assert.equal(c.handleMouse(MOUSE("press", scope.from - 1, 0)), undefined); // 标题上点不动
   assert.equal(c.scope, "current");
 
   type(c, "abc");
@@ -1068,6 +1068,54 @@ test("懒加载：只有 pin 过滤时也不列占位项，解析后只补置顶
   assert.equal(c.filtered[0].path, "/b.jsonl");
 });
 
+test("Alt+S：最近提问 / 创建时间切换，头部字样和列表顺序跟着变，点头部也能切", () => {
+  const a = mk("D:/other", ["asked lately"], 10); // 10 天前建，1 天前提问
+  a.lastPrompt = Date.now() - 86400e3;
+  const b = mk("D:/other", ["created lately"], 2); // 2 天前建，没提问记录 → 退回 mtime
+  const c = make([a, b], "D:/nowhere");
+  const order = () => c.filtered.map((s: PeekSession) => s.first);
+  assert.equal(c.sort, "prompt");
+  assert.deepEqual(order(), ["asked lately", "created lately"]);
+  assert.ok(c.render(120).map(strip)[0].includes("排序: 提问"));
+
+  c.handleInput(ALT("s"));
+  assert.equal(c.sort, "created");
+  assert.deepEqual(order(), ["created lately", "asked lately"]);
+  assert.ok(c.render(120).map(strip)[0].includes("排序: 创建"));
+
+  const chip = c.headHits.find((h: any) => h.act === "sort");
+  assert.deepEqual(c.handleMouse(MOUSE("press", chip.from, 0)), { handled: true, render: true });
+  assert.equal(c.sort, "prompt");
+});
+
+test("Alt+D / draft:true：只看草稿，和输入框里的条件、置顶开关都是 AND，点头部也能切", () => {
+  const draft = { ...mk("D:/other", ["parked idea"], 1), draft: true };
+  const normal = mk("D:/other", ["finished"], 2);
+  const c = make([draft, normal], "D:/nowhere");
+  assert.equal(c.filtered.length, 2);
+
+  c.handleInput(ALT("d"));
+  assert.deepEqual(c.filtered.map((s: PeekSession) => s.first), ["parked idea"]);
+  assert.ok(c.render(120).map(strip)[0].includes("草稿: 仅草稿"));
+
+  c.handleInput(ALT("d"));
+  assert.equal(c.filtered.length, 2);
+  assert.ok(c.render(120).map(strip)[0].includes("草稿: 全部"));
+
+  // 输入框里写 draft:false 和 Alt+D 同时生效 → 没有会话
+  const d = make([draft, normal], "D:/nowhere", "draft:false");
+  assert.deepEqual(d.filtered.map((s: PeekSession) => s.first), ["finished"]);
+  d.handleInput(ALT("d"));
+  assert.equal(d.filtered.length, 0);
+
+  const e = make([draft, normal], "D:/nowhere");
+  assert.deepEqual(e.headHits, [], "还没 render 就没有可点区域");
+  e.render(120);
+  const eChip = e.headHits.find((h: any) => h.act === "draft");
+  assert.deepEqual(e.handleMouse(MOUSE("press", eChip.from, 0)), { handled: true, render: true });
+  assert.equal(e.filtered.length, 1);
+});
+
 test("Alt+P：只看置顶，再按一次取消，和输入框里的 pin: 条件是 AND", () => {
   const t0 = Date.now();
   const pinned = { ...parsed("/a.jsonl", "D:/other", ["alpha"], t0), pinned: true };
@@ -1078,11 +1126,11 @@ test("Alt+P：只看置顶，再按一次取消，和输入框里的 pin: 条件
   c.handleInput(KEY.ap);
   assert.equal(c.filtered.length, 1);
   assert.equal(c.filtered[0].path, "/a.jsonl");
-  assert.ok(c.render(120).map(strip)[0].includes("只看置顶"));
+  assert.ok(c.render(120).map(strip)[0].includes("置顶: 仅置顶"));
 
   c.handleInput(KEY.ap);
   assert.equal(c.filtered.length, 2);
-  assert.ok(!c.render(120).map(strip)[0].includes("只看置顶"));
+  assert.ok(c.render(120).map(strip)[0].includes("置顶: 全部"));
 
   // 输入框里的 pin:false 和 Alt+P 同时生效 → 没有会话
   const d = make([pinned, plain], "D:/nowhere", "pin:false");

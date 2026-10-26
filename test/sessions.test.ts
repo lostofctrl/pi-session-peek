@@ -13,6 +13,8 @@ import {
   renameSession,
   scanRoot,
   scanSessions,
+  sessionStamp,
+  sortSessions,
   sessionsDir,
   toolSummary,
   trashCommands,
@@ -358,4 +360,106 @@ test("scanSessions: pi-web 的 /pin 状态取最后一条记录，没写过 /pin
   const m = (await scanSessions()).find((s) => s.path === q)!;
   assert.equal(m.pinned, undefined);
   assert.ok(matchesSession(m, parseQuery("pi-web:pin").terms));
+});
+
+function writeRaw(name: string, entries: unknown[]): string {
+  const p = join(dir, `${name}.jsonl`);
+  writeFileSync(p, entries.map(line).join(""));
+  return p;
+}
+
+const T0 = Date.parse("2026-09-01T00:00:00.000Z");
+const iso = (ms: number) => new Date(ms).toISOString();
+
+// 消息记录：message.timestamp 是毫秒，记录上的 timestamp 是 ISO；stopReason 只有 AI 轮次有
+function msg(role: string, text: string, at: number, stopReason?: string) {
+  return {
+    type: "message", id: `${role}${at}`, parentId: null, timestamp: iso(at),
+    message: { role, content: [{ type: "text", text }], timestamp: at, ...(stopReason ? { stopReason } : {}) },
+  };
+}
+
+const header = (name: string) => ({ type: "session", version: 3, id: name, timestamp: iso(T0), cwd: "D:/proj" });
+
+test("解析: lastPrompt 取最后一条用户消息的时间", async () => {
+  const p = writeRaw("prompt-time", [
+    header("prompt-time"),
+    msg("user", "q1", T0),
+    msg("assistant", "a1", T0 + 1000, "stop"),
+    msg("user", "q2", T0 + 2000),
+    msg("assistant", "a2", T0 + 3000, "stop"),
+  ]);
+  assert.equal((await loadSession(p))!.lastPrompt, T0 + 2000);
+
+  // 消息上没有毫秒时间戳（老记录）时退回记录上的 ISO 时间
+  const q = writeRaw("prompt-fallback", [
+    header("prompt-fallback"),
+    { type: "message", id: "u", parentId: null, timestamp: iso(T0 + 5000), message: { role: "user", content: [{ type: "text", text: "x" }] } },
+  ]);
+  assert.equal((await loadSession(q))!.lastPrompt, T0 + 5000);
+
+  // 完全没有用户消息就没有这个键（排序时退回 mtime）
+  const r = writeRaw("prompt-none", [header("prompt-none"), msg("assistant", "only ai", T0, "stop")]);
+  assert.equal((await loadSession(r))!.lastPrompt, undefined);
+});
+
+test("解析: status 看末轮有没有答完，done = AI 答完（settled），aborted = 中断 / 报错", async () => {
+  const load = async (name: string, msgs: unknown[]) => (await loadSession(writeRaw(name, [header(name), ...msgs])))!;
+
+  const done = await load("st-done", [msg("user", "q", T0), msg("assistant", "a", T0 + 1000, "stop")]);
+  assert.equal(done.status, "done");
+  // 只有工具调用的 AI 轮次也算答完
+  const toolsOnly = await load("st-tools", [msg("user", "q", T0), msg("assistant", "", T0 + 1000, "stop")]);
+  assert.equal(toolsOnly.status, "done");
+
+  assert.equal((await load("st-abort", [msg("user", "q", T0), msg("assistant", "a", T0 + 1000, "aborted")])).status, "aborted");
+  assert.equal((await load("st-error", [msg("user", "q", T0), msg("assistant", "a", T0 + 1000, "error")])).status, "aborted");
+
+  // 末条是工具调用 / 用户 / 工具结果：这轮还没答完，不给状态
+  assert.equal((await load("st-running", [msg("user", "q", T0), msg("assistant", "", T0 + 1000, "toolUse")])).status, undefined);
+  assert.equal((await load("st-waiting", [msg("user", "q", T0), msg("assistant", "a", T0 + 1000, "stop"), msg("user", "again", T0 + 2000)])).status, undefined);
+  const withTool = [
+    header("st-tool-tail"),
+    msg("user", "q", T0),
+    msg("assistant", "", T0 + 1000, "toolUse"),
+    { type: "message", id: "r1", parentId: null, timestamp: iso(T0 + 2000), message: { role: "toolResult", content: [{ type: "text", text: "output" }] } },
+  ];
+  assert.equal((await loadSession(writeRaw("st-tool-tail", withTool)))!.status, undefined);
+});
+
+test("解析: draft 是 pi-web 停在那儿的草稿，AI 回答过就不是了", async () => {
+  const marker = { type: "custom", id: "d1", parentId: null, timestamp: iso(T0), customType: "draft-session", data: { version: 1, text: "parked" } };
+  const load = async (name: string, entries: unknown[]) => (await loadSession(writeRaw(name, [header(name), ...entries])))!;
+
+  assert.equal((await load("draft-parked", [marker, msg("user", "parked", T0)])).draft, true);
+  assert.equal((await load("draft-answered", [marker, msg("user", "parked", T0), msg("assistant", "hello", T0 + 1000, "stop")])).draft, undefined);
+  // 没有草稿记录的普通会话
+  assert.equal((await load("draft-none", [msg("user", "hi", T0)])).draft, undefined);
+
+  // 老式的 "Draft: " 名字，AI 从没开口过才算草稿
+  const named = (name: string) => ({ type: "session_info", id: "i1", parentId: null, timestamp: iso(T0), name });
+  assert.equal((await load("draft-legacy", [named("Draft: parked"), msg("user", "parked", T0)])).draft, true);
+  assert.equal((await load("draft-legacy-answered", [named("Draft: parked"), msg("user", "parked", T0), msg("assistant", "hi", T0 + 1000, "stop")])).draft, undefined);
+});
+
+test("sortSessions / sessionStamp: 按提问或创建时间倒序，没提问记录时用 mtime 兜底", () => {
+  const base = { cwd: "D:/proj", name: "", first: "", msgs: [], size: 0 };
+  const a: PeekSession = { ...base, path: "a", time: iso(T0), mtime: 5, lastPrompt: T0 + 3000 };
+  const b: PeekSession = { ...base, path: "b", time: iso(T0 + 1000), mtime: 3 };
+  const c: PeekSession = { ...base, path: "c", time: iso(T0 + 2000), mtime: 4, lastPrompt: T0 + 1000 };
+  const all = [a, b, c];
+
+  assert.deepEqual(sortSessions(all, "prompt").map((s) => s.path), ["a", "c", "b"]);
+  assert.deepEqual(sortSessions(all, "created").map((s) => s.path), ["c", "b", "a"]);
+  assert.deepEqual(all.map((s) => s.path), ["a", "b", "c"], "不改入参顺序");
+
+  assert.equal(sessionStamp(a, "prompt"), T0 + 3000);
+  assert.equal(sessionStamp(b, "prompt"), 3); // 没提问记录
+  assert.equal(sessionStamp(b, "created"), T0 + 1000);
+  // 时间一样时按 mtime 倒序，顺序稳定
+  const t = { ...base, time: iso(T0), lastPrompt: T0 };
+  assert.deepEqual(
+    sortSessions([{ ...t, path: "old", mtime: 1 }, { ...t, path: "new", mtime: 2 }], "prompt").map((s) => s.path),
+    ["new", "old"],
+  );
 });

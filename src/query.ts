@@ -10,6 +10,8 @@ import { stylePrefix, type PeekTheme } from "./theme.ts";
 //   /re/           正则（JS 语法，自动带 i 和 m 标志，不能含空白，用 \s 代替）；写错了按普通文字搜
 //   -foo           排除：命中的会话不显示。--foo 还是普通词，要搜以 - 开头的词就加引号
 //   name:foo       只在会话名里找；cwd: / dir: 只看工作目录；user: / ai:（assistant:）只看对应角色的消息
+//   pin:true       只看置顶（pin:false / -pin:true 反过来）
+//   draft:true     只看 pi-web 的草稿（draft:false 反过来）
 //   @7d            只看最近 7 天活动过的会话，单位 h / d / w / m
 // 前缀可以叠：-user:"foo bar"。引号是万能转义："-foo"、"a|b"、"name:x"、"/x/" 都按字面搜
 
@@ -28,6 +30,8 @@ export interface ParsedQuery {
   // pi-web 的 /pin 状态约束：true 只要置顶，false 只要未置顶。空数组表示不过滤。
   // 同时写 pinned:true 和 pinned:false 就是两条约束，结果为空（和普通词一样是 AND）
   pinned: boolean[];
+  // 同上，pi-web 的草稿状态（draft-session 记录还没被 AI 回答）
+  drafts: boolean[];
 }
 
 const TIME_UNIT_MS: Record<string, number> = { h: 3600e3, d: 86400e3, w: 7 * 86400e3, m: 30 * 86400e3 };
@@ -82,6 +86,7 @@ export function parseQuery(q: string): ParsedQuery {
   let since = 0;
   let sinceLabel = "";
   const pinned: boolean[] = [];
+  const drafts: boolean[] = [];
   for (const tok of q.match(TOKEN_RE) ?? []) {
     const m = /^@(\d+)([hdwm])$/i.exec(tok);
     if (m) {
@@ -93,11 +98,12 @@ export function parseQuery(q: string): ParsedQuery {
       }
       continue;
     }
-    const pin = /^(-?)(?:pin|pinned):(true|false|1|0)$/i.exec(tok);
-    if (pin) {
-      const want = /^(true|1)$/i.test(pin[2]);
-      const value = pin[1] ? !want : want;
-      if (!pinned.includes(value)) pinned.push(value);
+    const flag = /^(-?)(pin|pinned|draft|drafts):(true|false|1|0)$/i.exec(tok);
+    if (flag) {
+      const want = /^(true|1)$/i.test(flag[3]);
+      const value = flag[1] ? !want : want;
+      const into = flag[2].toLowerCase().startsWith("draft") ? drafts : pinned;
+      if (!into.includes(value)) into.push(value);
       continue;
     }
     const t = parseTerm(tok);
@@ -107,7 +113,7 @@ export function parseQuery(q: string): ParsedQuery {
     seen.add(key);
     terms.push(t);
   }
-  return { terms, since, sinceLabel, pinned };
+  return { terms, since, sinceLabel, pinned, drafts };
 }
 
 // 从 from 起找第一个非空命中。g 标志的正则复用前要设 lastIndex，否则从上次命中的位置接着找；
@@ -145,9 +151,10 @@ function termHits(s: PeekSession, t: Term): boolean {
 
 // 每个词都要满足：普通词在会话名或某条消息里出现，排除词则哪里都不出现；带前缀的只看对应的地方。
 // 正文不预存小写副本，直接在原文上用不区分大小写的正则匹配
-export function matchesSession(s: PeekSession, terms: Term[], pinned: boolean[] = []): boolean {
-  // 置顶状态没有正文可高亮，只作为过滤条件；没写过 /pin 的会话按未置顶算
+export function matchesSession(s: PeekSession, terms: Term[], pinned: boolean[] = [], drafts: boolean[] = []): boolean {
+  // 置顶 / 草稿状态没有正文可高亮，只作为过滤条件；没写过 /pin 的会话按未置顶算，草稿也一样
   if (!pinned.every((want) => (s.pinned === true) === want)) return false;
+  if (!drafts.every((want) => (s.draft === true) === want)) return false;
   return terms.every((t) => termHits(s, t) !== t.negate);
 }
 
