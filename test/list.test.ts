@@ -71,6 +71,19 @@ test("listRows：状态图标 ✓ 已答完 / ⏹ 中断，没有状态就没有
   assert.doesNotMatch(row(running), /[✓⏹]/);
 });
 
+test("listRows：置顶的会话第一列换图标，时间列照样对齐", () => {
+  const row = (s: PeekSession) => strip(listRows(s, false, 40, NO_TERMS.rt, NO_TERMS.hasBody, theme, undefined, "prompt", NOW)[0]);
+  // 置顶图标都占两格，后面的时间列不会左右跳
+  assert.match(row({ ...sess("D:/proj", "p"), pinned: true }), /^ {2}📌 +2d /);
+  assert.match(row({ ...sess("D:/proj", "p"), pinned: true, status: "done" }), /^ {2}✅ +2d /);
+  assert.match(row({ ...sess("D:/proj", "p"), pinned: true, status: "aborted" }), /^ {2}📎 +2d /);
+  // 取消置顶后回到原来的状态图标
+  assert.match(row({ ...sess("D:/proj", "p"), pinned: false, status: "done" }), /^ {2}✓ +2d /);
+  // 选中行也一样，图标在时间前面
+  const [sel] = listRows({ ...sess("D:/proj", "p"), pinned: true }, true, 40, NO_TERMS.rt, NO_TERMS.hasBody, theme, undefined, "prompt", NOW);
+  assert.match(strip(sel), /^› 📌 +2d /);
+});
+
 test("listRows：Alt+S 换排序时，时间列跟着显示创建时间 / 最近提问", () => {
   const s = sess("D:/proj", "hi");
   s.lastPrompt = new Date(2020, 0, 4, 3, 4).getTime(); // 提问比创建晚两天

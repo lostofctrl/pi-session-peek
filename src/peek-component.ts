@@ -2,6 +2,8 @@ import {
   Input,
   Key,
   matchesKey,
+  parseKey,
+  sliceByColumn,
   truncateToWidth,
   visibleWidth,
   type Component,
@@ -14,6 +16,7 @@ import { msg } from "./i18n.ts";
 import { DragSelect } from "./drag-select.ts";
 import { BODY_TOP, bodyRows, paneWidths } from "./layout.ts";
 import { buildList, followSelection, listRows, visibleItems, type ListCache } from "./list.ts";
+import { menuLayout, menuLines, menuWidth, type MenuAction, type MenuItem } from "./menu.ts";
 import { buildPreview, initialOffset, nextMatchTarget, type RenderCache } from "./preview.ts";
 import { matchesSession, parseQuery, roleTerms, type ParsedQuery, type RoleTerms } from "./query.ts";
 import { bounds, highlightColumns, rowColumns, selectionText, type Selection } from "./selection.ts";
@@ -28,9 +31,13 @@ import type { PeekTheme } from "./theme.ts";
 const WHEEL_LINES = 3; // 滚轮每格滚几行预览，和 Shift+↑↓ 一样
 const WHEEL_ITEMS = 1; // 滚轮每格滚几个列表项（每项两行）。只滚视图，不换选中项，像浏览器的滚动条
 const HINT_MS = 1500; // 底部"已复制"提示停留时间
+const MENU_ROWS = 4; // ↑↓ 滚过几行就画一次菜单，省得每格都重画
 
 // 头部四个可点 / 可按键切换的开关
 type HeadAction = "scope" | "sort" | "pin" | "draft";
+
+// 鼠标按下到松开之间移动超过这么多列就算拖动选字，不算点击（菜单在松开时才弹）
+const DRAG_SLOP = 3;
 
 export class PeekComponent implements Component, Focusable {
   private input: Input;
@@ -74,6 +81,12 @@ export class PeekComponent implements Component, Focusable {
       this.requestRender?.();
     },
   });
+  // 右键（或 Ctrl+Enter）打开的会话菜单。anchorRow / anchorCol 是弹出位置（主体行号、组件列号）
+  private menu?: { session: PeekSession; anchorRow: number; anchorCol: number; index: number; items: MenuItem[] };
+  private menuBox?: { top: number; left: number; width: number }; // 菜单盒子在主休里的位置，鼠标命中和绘制用
+  private swallowClick = false; // 菜单刚用鼠标松开处理过，紧跟的 click 事件吃掉，别落到下面的列表上
+  private pressedAt?: { x: number; y: number }; // 左键按下的位置，判断是点击还是拖选
+  private dragged = false; // 本次按下之后拖过：原地松开才弹右键菜单
   private hint?: { text: string; ok: boolean }; // 底部一闪而过的复制结果
   private hintTimer?: ReturnType<typeof setTimeout>;
   private _focused = false;
@@ -85,6 +98,7 @@ export class PeekComponent implements Component, Focusable {
   onDelete?: (s: PeekSession) => Promise<boolean>;
   onRename?: (s: PeekSession, name: string) => Promise<boolean>;
   onCopy?: (text: string) => Promise<boolean>; // 拖选后 Ctrl+C
+  onPin?: (s: PeekSession, pinned: boolean) => Promise<boolean>; // 菜单里的置顶开关，写进会话文件
   onDispose?: () => void; // 关闭时
   requestRender?: () => void; // 异步操作完成后让 TUI 重画
   afterRender?: () => void; // 每次 render 之后调用；常规模式的鼠标桥接靠它重新测组件在屏幕上的位置
@@ -227,6 +241,11 @@ export class PeekComponent implements Component, Focusable {
   }
 
   handleInput(data: string): void {
+    // 菜单打开时吃掉全部按键：↑↓ 换项，Enter 执行，Esc / Ctrl+C / 其他任何键关闭
+    if (this.menu) {
+      this.menuKey(data);
+      return;
+    }
     // 重命名输入中：Enter 提交，Esc / Ctrl+C 取消，其他键交给输入框
     if (this.mode === "rename") {
       if (matchesKey(data, Key.enter)) {
@@ -379,6 +398,14 @@ export class PeekComponent implements Component, Focusable {
       this.headAction("sort");
       return;
     }
+    if (matchesKey(data, Key.ctrl("w"))) {
+      this.togglePin();
+      return;
+    }
+    if (matchesKey(data, Key.ctrl("y"))) {
+      this.copyPath();
+      return;
+    }
     if (matchesKey(data, Key.ctrl("t"))) {
       this.showTools = !this.showTools;
       this.previewKey = "";
@@ -397,6 +424,12 @@ export class PeekComponent implements Component, Focusable {
     if (matchesKey(data, Key.enter)) {
       const s = this.filtered[this.selected];
       if (s && !this.busy) this.onResume?.(s);
+      return;
+    }
+    // Ctrl+Enter：不给鼠标也能开菜单，锚在当前选中项第一行
+    if (parseKey(data) === "ctrl+enter") {
+      const s = this.filtered[this.selected];
+      if (s) this.openMenu(s, (this.selected - this.listOffset) * 2, 2);
       return;
     }
     if (matchesKey(data, Key.ctrl("o"))) {
@@ -428,9 +461,20 @@ export class PeekComponent implements Component, Focusable {
     const inBody = bodyRow >= 0 && bodyRow < H;
     const itemAt = (): number => (inList && inBody ? this.listOffset + (bodyRow >> 1) : -1); // 每项两行
 
+    // 菜单刚用鼠标松开处理过（执行了某项或点外关闭），鼠标桥接随后补的 click 不能再落到下面的列表上
+    if (this.swallowClick) {
+      if (ev.type === "click") {
+        this.swallowClick = false;
+        return { handled: true, render: false };
+      }
+      if (ev.type === "press" || ev.type === "wheel") this.swallowClick = false; // 没有补 click 的话别一直吞
+    }
+
     if (ev.type === "wheel") {
       const delta = ev.wheelDelta ?? 0;
       if (!delta) return undefined;
+      // 菜单开着滚轮不滚内容，只吃掉事件
+      if (this.menu) return { handled: true, render: false };
       // 和按键一样，滚一下就算取消确认。只退出确认，改名中滚轮不退出改名
       let changed = this.cancelConfirm();
       if (inList) {
@@ -452,6 +496,49 @@ export class PeekComponent implements Component, Focusable {
       if (changed) this.invalidate();
       return { handled: true, render: changed };
     }
+    // 菜单：点菜单项执行，点外关闭；按下 / 松开 / 随后合成的 click 都要接住
+    if (this.menu) {
+      if (ev.type === "press") return { handled: true, render: false };
+      if (ev.type === "release") {
+        const idx = this.menuItemAt(ev.x, ev.y);
+        // 同一格松开后，鼠标桥接还会补一个 click；别让它落到下面的列表上
+        this.swallowClick = true;
+        if (idx >= 0) this.runMenu(idx);
+        else this.closeMenu();
+        return { handled: true, render: true };
+      }
+      if (ev.type === "click") {
+        const idx = this.menuItemAt(ev.x, ev.y);
+        if (idx >= 0) this.runMenu(idx);
+        else this.closeMenu();
+        return { handled: true, render: true };
+      }
+      // 拖动、滚轮都吃掉
+      return { handled: true, render: false };
+    }
+    // 右键：按下时记下位置，原地松开才弹菜单（拖开就不弹），按下松开都吃掉不传给别人
+    if (ev.button === "right") {
+      if (ev.type === "press") {
+        this.pressedAt = { x: ev.x, y: ev.y };
+        this.dragged = false;
+      } else if (ev.type === "drag") {
+        this.markDragged(ev.x, ev.y);
+      } else if (ev.type === "release") {
+        const idx = inList && inBody ? this.listOffset + (bodyRow >> 1) : -1;
+        const s = idx >= 0 && idx < this.filtered.length ? this.filtered[idx] : undefined;
+        const dragged = this.dragged;
+        this.dragged = false;
+        if (s && !dragged && !this.busy) {
+          // 菜单就弹在鼠标处：行用按下时的行，列用点击的列
+          this.openMenu(s, Math.max(0, bodyRow), ev.x);
+          this.swallowClick = true; // 紧跟的 right click 不算菜单里的点击
+          return { handled: true, render: true };
+        }
+      }
+      return { handled: true, render: false };
+    }
+    // 左键按住后离开按下位置超过拖动阀值就当成选字
+    if (ev.type === "drag") this.markDragged(ev.x, ev.y);
     if (ev.type === "drag") {
       const d = this.drag;
       if (!d.dragging || !d.sel || ev.button !== "left") return undefined;
@@ -464,6 +551,8 @@ export class PeekComponent implements Component, Focusable {
     }
     if (ev.button !== "left") return undefined;
     if (ev.type === "release") {
+      this.dragged = false;
+      // moved 不算的话，原地左键松开可能是在结束一段选字，也清一下
       if (!this.drag.release()) return undefined;
       return { handled: true, render: false };
     }
@@ -475,6 +564,8 @@ export class PeekComponent implements Component, Focusable {
       return { handled: true, render: false };
     }
     if (ev.type !== "press") return undefined;
+    this.pressedAt = { x: ev.x, y: ev.y };
+    this.dragged = false;
 
     // 删除确认和已有的选区：点一下就没了，和按键一样
     let changed = this.cancelConfirm() || this.drag.active() !== undefined;
@@ -510,6 +601,153 @@ export class PeekComponent implements Component, Focusable {
     if (!handled) return undefined;
     if (changed) this.invalidate();
     return inBody ? { handled: true, capture: true, render: changed } : { handled: true, render: changed };
+  }
+
+  // 离开按下位置超过拖动阀值，就把这次拖动算成选字而不是点击
+  private markDragged(x: number, y: number): void {
+    const p = this.pressedAt;
+    if (p && (Math.abs(x - p.x) > DRAG_SLOP || Math.abs(y - p.y) > DRAG_SLOP)) this.dragged = true;
+  }
+
+  // ---- 会话菜单 ----
+
+  // 菜单项：置顶文案跟着当前状态走，占位项（还没解析）给不了名字就先不给改名、分叉、删除
+  private menuItems(s: PeekSession): MenuItem[] {
+    const items: MenuItem[] = [
+      { action: "open", label: msg("menuOpen") },
+      { action: "fork", label: msg("menuFork") },
+      { action: "rename", label: msg("menuRename") },
+      { action: "pin", label: s.pinned ? msg("menuUnpin") : msg("menuPin") },
+      { action: "copyPath", label: msg("menuCopyPath") },
+    ];
+    items.push({ action: "delete", label: msg("menuDelete"), danger: true });
+    return items;
+  }
+
+  /** 在鼠标处（主体行 / 组件列）弹出菜单，会话已经选中 */
+  private openMenu(s: PeekSession, anchorRow: number, anchorCol: number): void {
+    const idx = this.filtered.indexOf(s);
+    if (idx < 0) return;
+    this.select(idx);
+    const H = this.layout.H;
+    this.menu = {
+      session: s,
+      anchorRow: Math.max(0, Math.min(anchorRow, Math.max(0, H - 1))),
+      anchorCol: Math.max(0, anchorCol),
+      index: 0,
+      items: this.menuItems(s),
+    };
+    this.invalidate();
+    this.requestRender?.();
+  }
+
+  private closeMenu(): void {
+    if (!this.menu) return;
+    this.menu = undefined;
+    this.menuBox = undefined;
+    this.invalidate();
+    this.requestRender?.();
+  }
+
+  // 组件内坐标 → 菜单项序号，不在菜单里返回 -1
+  private menuItemAt(x: number, y: number): number {
+    const box = this.menuBox;
+    const m = this.menu;
+    if (!m || !box) return -1;
+    if (x <= box.left || x >= box.left + box.width - 1) return -1;
+    const i = y - BODY_TOP - box.top - 1; // 第一行是上边框
+    return i >= 0 && i < m.items.length ? i : -1;
+  }
+
+  // 菜单里的按键：↑↓ 换项，Enter 执行，Esc / Ctrl+C / 其他任何键关闭
+  private menuKey(data: string): void {
+    const m = this.menu;
+    if (!m) return;
+    const n = m.items.length;
+    if (matchesKey(data, Key.down) || matchesKey(data, Key.tab)) {
+      m.index = (m.index + 1) % n;
+      this.invalidate();
+      return;
+    }
+    if (matchesKey(data, Key.up)) {
+      m.index = (m.index + n - 1) % n;
+      this.invalidate();
+      return;
+    }
+    if (matchesKey(data, Key.enter)) {
+      this.runMenu(m.index);
+      return;
+    }
+    this.closeMenu();
+  }
+
+  private runMenu(index: number): void {
+    const m = this.menu;
+    if (!m) return;
+    const s = m.session;
+    const act: MenuAction | undefined = m.items[index]?.action;
+    this.closeMenu();
+    if (!act || this.busy) return;
+    if (act === "open") this.onResume?.(s);
+    else if (act === "fork") this.onFork?.(s);
+    else if (act === "rename") this.startRename(s);
+    else if (act === "pin") this.togglePin(s);
+    else if (act === "copyPath") this.copyPath(s);
+    else if (act === "delete") {
+      this.select(this.filtered.indexOf(s));
+      this.mode = "confirmDelete";
+      this.invalidate();
+    }
+  }
+
+  // 进入改名：占位项还没有旧名字，改名也会被后台解析覆盖，等载入完
+  private startRename(s: PeekSession): void {
+    if (s.pending) {
+      this.showHint(msg("loadingSession"), false);
+      return;
+    }
+    if (this.busy) return;
+    this.mode = "rename";
+    this.renameInput.setValue(s.name || "");
+    this.focused = this._focused;
+    this.invalidate();
+  }
+
+  // 置顶开关（Ctrl+W 和菜单共用）：先写文件，成功了再改内存和显示
+  private togglePin(target?: PeekSession): void {
+    const s = target ?? this.filtered[this.selected];
+    if (!s || this.busy) return;
+    if (s.pending) {
+      this.showHint(msg("pinUnsupported"), false);
+      return;
+    }
+    if (!this.onPin) return;
+    const want = !s.pinned;
+    this.busy = true;
+    void this.onPin(s, want).then((ok) => {
+      if (!ok) {
+        this.showHint(msg("pinFailed"), false);
+        return;
+      }
+      if (want) s.pinned = true;
+      else delete s.pinned;
+      this.showHint(want ? msg("pinHint") : msg("unpinHint"), true);
+      // 「只看置顶」开着时取消置顶会让它从列表里消失，得重新过滤
+      if (this.pinOnly || this.query().pinned.length) this.refilter(true, true);
+    }).catch(() => {
+      this.showHint(msg("pinFailed"), false);
+    }).finally(() => {
+      this.busy = false;
+      this.invalidate();
+      this.requestRender?.();
+    });
+  }
+
+  // 复制完整会话文件路径（Ctrl+Y 和菜单共用）
+  private copyPath(target?: PeekSession): void {
+    const s = target ?? this.filtered[this.selected];
+    if (!s || !this.onCopy) return;
+    void this.onCopy(s.path).then((ok) => this.showHint(ok ? msg("pathCopied") : msg("pathCopyFailed"), ok));
   }
 
   // 头部四个开关：点头部的字样、Tab / Alt+S / Alt+P / Alt+D 都走这里
@@ -672,9 +910,27 @@ export class PeekComponent implements Component, Focusable {
     const scrollInfo = info ? t.fg("dim", info) : "";
 
     const sel = this.drag.active();
+    // 菜单盒子盖到左栏上，坐标相对主体；每次重画重算，终端大小变了也跟着重新摆放
+    let overlay: { top: number; left: number; lines: string[] } | undefined;
+    this.menuBox = undefined;
+    if (this.menu) {
+      const items = this.menu.items;
+      const box = menuLayout(this.menu.anchorRow, this.menu.anchorCol, items.length, H, lw, menuWidth(items));
+      this.menuBox = box;
+      overlay = { ...box, lines: menuLines(items, this.menu.index, box.width, t) };
+    }
     for (let i = 0; i < H; i++) {
       let l = leftRows[i] ?? " ".repeat(lw);
       let r = rightRows[i] ?? "";
+      if (overlay) {
+        const k = i - overlay.top;
+        const line = overlay.lines[k];
+        if (line !== undefined) {
+          const start = Math.min(overlay.left, lw);
+          const len = Math.min(visibleWidth(line), lw - start);
+          l = sliceByColumn(l, 0, start) + line + sliceByColumn(l, start + len, lw - start - len);
+        }
+      }
       const infoW = i === 0 && scrollInfo ? visibleWidth(scrollInfo) : 0;
       if (infoW) r = truncateToWidth(r, Math.max(0, rw - infoW));
       r = padEndVisible(r, rw - infoW) + (infoW ? scrollInfo : "");
@@ -707,6 +963,8 @@ export class PeekComponent implements Component, Focusable {
       );
     } else if (this.hint) {
       out.push(truncateToWidth(t.fg(this.hint.ok ? "success" : "error", this.hint.text), width));
+    } else if (this.menu) {
+      out.push(truncateToWidth(t.fg("warning", msg("menuHint")), width));
     } else if (sel) {
       const [s, e] = bounds(sel);
       out.push(truncateToWidth(t.fg("warning", msg("selHint", { n: e.row - s.row + 1 })), width));

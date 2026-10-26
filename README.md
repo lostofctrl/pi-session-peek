@@ -16,11 +16,13 @@ Search your [pi](https://pi.dev) session history by what was actually said, read
 - Requires every space-separated keyword to match, and shows a snippet around the first hit in the list.
 - Understands `"exact phrases"`, `either|or`, `-exclude`, `name:` / `dir:` / `user:` / `ai:` prefixes, `/regex/`, `pin:true` / `pin:false` for Pi Web's `/pin` state, and `draft:true` / `draft:false` for its drafts. `Alt+P`, `Alt+D` and `Alt+S` toggle pinned-only, drafts-only and the sort order without touching the typed query.
 - Limits results to recently active sessions with `@7d`, `@24h`, `@2w` or `@1m`.
-- Shows each session's age as relative time (`now`, `2h`, `3d`, `1w`) instead of a fixed timestamp, plus a status icon: `✓` when the last reply finished, `⏹` when it was aborted or failed. Sessions with an unfinished turn (tools still running, or a question waiting for you) get no icon.
+- Shows each session's age as relative time (`now`, `2h`, `3d`, `1w`) instead of a fixed timestamp, plus a status icon: `✓` when the last reply finished, `⏹` when it was aborted or failed. Sessions with an unfinished turn (tools still running, or a question waiting for you) get no icon. Pinned rows use `📌` (still running), `✅` (pinned and finished) and `📎` (pinned but aborted).
+- Right-click a session for a context menu — open, fork, rename, pin / unpin, copy the file path, delete — or press `Ctrl+Enter` to open the same menu for the selected row. `↑` `↓` pick an item, `Enter` runs it, `Esc` closes.
 - Sorts newest first by last prompt; `Alt+S` switches to creation time. The header shows which of the two is active.
 - Highlights every hit in the preview and jumps between them with `Ctrl+N` / `Ctrl+P`.
 - Shows what the assistant actually did with `Ctrl+T`: one dim line per tool call (`⚙ bash  git status`, `⚙ edit  src/query.ts`) under the reply that made it. Off by default.
-- Resumes with `Enter`, forks into a new session with `Ctrl+O`, renames with `Ctrl+R`, deletes with `Ctrl+D`.
+- Resumes with `Enter`, forks into a new session with `Ctrl+O`, renames with `Ctrl+R`, deletes with `Ctrl+D`, pins with `Ctrl+W` (the same `pi-web:pin` record Pi Web's `/pin` writes) and copies the file path with `Ctrl+Y`.
+- The preview header shows the first and latest user prompt, so you can tell what a session is about at a glance.
 - Toggles between the current directory tree and all projects with `Tab`.
 - Starts straight into the picker with `pi --rp` or `pi --peek=<keyword>`.
 - Parses each session file once and caches it by mtime, so reopening is instant.
@@ -91,6 +93,9 @@ In TUI mode, run `/peek` and start typing. Press `Enter` on a session to continu
 | `Enter` | Resume the session |
 | `Ctrl+O` | Fork the session and open the fork |
 | `Ctrl+R` | Rename. Writes the same `session_info` entry as `/name`. |
+| `Ctrl+W` | Pin / unpin the session. Writes the same `pi-web:pin` record as Pi Web's `/pin`, so the state is shared with Pi Web's session list. |
+| `Ctrl+Y` | Copy the selected session's full file path to the clipboard. |
+| `Ctrl+Enter` | Open the session menu for the selected row (the keyboard equivalent of right-click). |
 | `Ctrl+D` | Delete, confirmed with `y` or `Enter`. Moves the file to the system trash whenever one is available (`trash` CLI, then the Windows Recycle Bin via PowerShell, Finder on macOS, `gio trash` / `trash-put` on Linux). Deletes permanently only if none of those work. |
 | `Esc` `Ctrl+C` | Close |
 
@@ -100,6 +105,8 @@ In TUI mode, run `/peek` and start typing. Press `Enter` on a session to continu
 | --- | --- |
 | Click a session in the list | Select it |
 | Double-click a session | Resume it (same as `Enter`) |
+| Right-click a session | Open its context menu at the pointer: open, fork, rename, pin / unpin, copy path, delete. The menu opens on a plain press-and-release; dragging past a few cells first cancels it. Near the bottom or right edge it flips up / left to stay on screen and inside the list pane. Right-clicking outside the list does nothing. |
+| Click a menu item | Run that action. Clicking outside the menu closes it without running anything. |
 | Wheel over the list | Scroll the list like a scrollbar; the selection stays where it is. `↑` `↓`, a click or a new filter bring it back into view. |
 | Wheel over the preview | Scroll the preview three lines per notch (`Alt` for five times faster) |
 | Click a switch in the header | Toggle the scope, the sort order, pinned-only or drafts-only (same as `Tab`, `Alt+S`, `Alt+P`, `Alt+D`) |
@@ -161,10 +168,11 @@ pi-session-peek/
 │   ├── peek-component.ts    # The two-pane component: state, key and mouse routing, header / footer, pane composition
 │   ├── preview.ts           # Right pane: preview lines and hit lines for a session, initial offset, Ctrl+N/P targets
 │   ├── list.ts              # Left pane: two rows per session, viewport following
+│   ├── menu.ts              # Session context menu: box width, placement, drawing
 │   ├── drag-select.ts       # Drag-selection state machine: press / drag / release / auto-scroll
 │   ├── selection.ts         # Selection geometry: ranges, inverse-video highlight, text extraction
 │   ├── layout.ts            # Pane widths and body height
-│   ├── sessions.ts          # Scans and parses session JSONL, rename / delete helpers
+│   ├── sessions.ts          # Scans and parses session JSONL, rename / pin / delete helpers, first and latest prompt
 │   ├── query.ts             # Query parsing, matching, highlighting, hit snippets
 │   ├── mouse.ts             # Mouse reporting for pi's regular (non-fullscreen) mode
 │   ├── ansi.ts              # Escape-sequence tokenising, SGR tracking, input sanitising

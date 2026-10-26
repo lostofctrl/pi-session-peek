@@ -20,12 +20,13 @@ export function followSelection(selected: number, offset: number, visible: numbe
 // Per-picker, one query/width revision per session; selection styling stays uncached.
 export type ListCache = WeakMap<PeekSession, { rt: RoleTerms; width: number; hits: number; snip: Snippet | undefined }>;
 
-// 一个会话的两行：状态图标 + 相对时间 + 目录（有正文关键词时加命中数），首条消息或命中片段
-// 状态图标：✓ 已答完（settled），⏹ 中断 / 报错；还在跑或没有 AI 回复就不画，占位保持对齐
+// 一个会话的两行：图标 + 相对时间 + 目录（有正文关键词时加命中数），首条消息或命中片段
+// 图标（ 宽两格）：📌 置顶（还在跑）· ✅ 置顶且已答完 · 📎 置顶但中断 / 报错；
+// 没置顶就看收尾状态 —— ✓ 已答完（settled），⏹ 中断 / 报错。都没有就留空格占位，后边的列不会歪
 export function statusCell(s: PeekSession, t: PeekTheme): string {
+  if (s.pinned) return padEndVisible(s.status === "done" ? "✅" : s.status === "aborted" ? "📎" : "📌", 2);
   if (!s.status) return "  ";
-  const icon = s.status === "done" ? t.fg("success", "✓") : t.fg("warning", "⏹");
-  return padEndVisible(icon, 2);
+  return padEndVisible(s.status === "done" ? t.fg("success", "✓") : t.fg("warning", "⏹"), 2);
 }
 
 export function listRows(

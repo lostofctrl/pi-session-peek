@@ -10,6 +10,9 @@ import {
   listSessionFiles,
   loadSession,
   pendingSession,
+  pinSession,
+  lastEntryId,
+  userPrompts,
   renameSession,
   scanRoot,
   scanSessions,
@@ -462,4 +465,54 @@ test("sortSessions / sessionStamp: 按提问或创建时间倒序，没提问记
     sortSessions([{ ...t, path: "old", mtime: 1 }, { ...t, path: "new", mtime: 2 }], "prompt").map((s) => s.path),
     ["new", "old"],
   );
+});
+
+test("userPrompts: 首条和最近一条用户提问，空白压成单空格并截断；没有用户消息就是空", () => {
+  const s = (msgs: { role: "user" | "assistant"; text: string }[]) => ({ path: "p", cwd: "D:/proj", time: "", name: "", first: "", msgs, mtime: 0, size: 0 }) as PeekSession;
+
+  assert.deepEqual(userPrompts(s([
+    { role: "user", text: "  first \n  line " },
+    { role: "assistant", text: "answer" },
+    { role: "user", text: "latest   one" },
+    { role: "assistant", text: "answer again" },
+  ])), { first: "first line", last: "latest one" });
+
+  // 只有一条提问：首尾是同一条
+  assert.deepEqual(userPrompts(s([{ role: "user", text: "only" }, { role: "assistant", text: "a" }])), { first: "only", last: "only" });
+  // AI 回复不算提问
+  assert.deepEqual(userPrompts(s([{ role: "assistant", text: "a" }])), {});
+  // 全是空白的用户消息跳过
+  assert.deepEqual(userPrompts(s([{ role: "user", text: "  \n " }, { role: "user", text: "real" }])), { first: "real", last: "real" });
+  // 截断长度
+  assert.equal(userPrompts(s([{ role: "user", text: "x".repeat(50) }]), 10).first, "x".repeat(10));
+});
+
+test("pinSession: 追加 pi-web:pin 记录，parentId 是最后一条记录，能跳过写了一半的末行", async () => {
+  const p = session("pin", { cwd: "D:\\proj", time: "2026-09-06T00:00:00.000Z", msgs: [["user", "hi"], ["assistant", "yo"]] });
+  writeFileSync(p, readFileSync(p, "utf8") + '{"type":"message","id":"half"');
+  pinSession(p, true);
+  let lines = readFileSync(p, "utf8").split("\n").filter(Boolean);
+  let last = JSON.parse(lines.at(-1)!);
+  assert.equal(last.type, "custom");
+  assert.equal(last.customType, "pi-web:pin");
+  assert.deepEqual(last.data, { version: 1, pinned: true });
+  assert.equal(last.parentId, "pin-1");
+  assert.equal(typeof last.id, "string");
+
+  // 列表里读到置顶状态
+  let t = Date.now();
+  utimesSync(p, new Date(t), new Date(t));
+  assert.equal((await scanSessions()).find((s) => s.path === p)!.pinned, true);
+
+  // 再写一条取消置顶，最后一条生效；新记录挂在上一条置顶记录下面
+  const prevId = JSON.parse(readFileSync(p, "utf8").split("\n").filter(Boolean).at(-1)!).id;
+  pinSession(p, false);
+  lines = readFileSync(p, "utf8").split("\n").filter(Boolean);
+  last = JSON.parse(lines.at(-1)!);
+  assert.equal(last.parentId, prevId);
+  assert.deepEqual(last.data, { version: 1, pinned: false });
+  assert.equal(lastEntryId(p), last.id);
+  t += 1000;
+  utimesSync(p, new Date(t), new Date(t));
+  assert.equal((await scanSessions()).find((s) => s.path === p)!.pinned, false);
 });

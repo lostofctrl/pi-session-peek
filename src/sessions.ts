@@ -245,6 +245,20 @@ function parseSession(path: string, raw: string, mtime: number, size: number): P
   };
 }
 
+/** 会话里的首条和最近一条用户提问：空白压成单空格、截到 max 字。没有用户消息就是 undefined */
+export function userPrompts(s: PeekSession, max = 120): { first?: string; last?: string } {
+  let first: string | undefined;
+  let last: string | undefined;
+  for (const m of s.msgs) {
+    if (m.role !== "user" || !m.text) continue;
+    const text = m.text.replace(/\s+/g, " ").trim();
+    if (!text) continue;
+    if (first === undefined) first = text.slice(0, max);
+    last = text.slice(0, max);
+  }
+  return { ...(first === undefined ? {} : { first }), ...(last === undefined ? {} : { last }) };
+}
+
 // 单个文件：mtime 没变直接用缓存，否则重新读和解析
 export async function loadSession(file: string): Promise<PeekSession | null> {
   let mtime: number;
@@ -320,31 +334,47 @@ export async function listSessionFiles(root: string = sessionsDir()): Promise<Se
 // 和 pi 自带的 /name 写同一种 session_info 记录，parentId 用文件里最后一条记录的 id
 export function renameSession(path: string, name: string): void {
   name = sanitizeText(name).replace(/\n+/g, " ").trim(); // 和 pi 的 appendSessionInfo 一样，换行不能进 JSONL 的一行
-  const raw = readFileSync(path, "utf8");
-  const lines = raw.split("\n");
-  let parentId: string | null = null;
+  appendEntry(path, {
+    type: "session_info",
+    id: randomBytes(4).toString("hex"),
+    parentId: lastEntryId(path),
+    timestamp: new Date().toISOString(),
+    name,
+  });
+}
+
+/** 文件里最后一条记录的 id：新记录挂在它下面，和 pi 自己追加记录的做法一样。末行可能只写了一半，跳过 */
+export function lastEntryId(path: string): string | null {
+  const lines = readFileSync(path, "utf8").split("\n");
   for (let i = lines.length - 1; i >= 0; i--) {
     if (!lines[i]) continue;
     try {
       const o = JSON.parse(lines[i]);
-      if (typeof o.id === "string") {
-        parentId = o.id;
-        break;
-      }
+      if (typeof o.id === "string") return o.id;
     } catch {
       // 末行可能只写了一半
     }
   }
-  const entry = {
-    type: "session_info",
-    id: randomBytes(4).toString("hex"),
-    parentId,
-    timestamp: new Date().toISOString(),
-    name,
-  };
-  // 末行没换行（写了一半）时先补一个，别和新记录粘在一起
+  return null;
+}
+
+/** 追加一条记录。末行没换行（写了一半）时先补一个，别和新记录粘在一起 */
+export function appendEntry(path: string, entry: Record<string, unknown>): void {
+  const raw = readFileSync(path, "utf8");
   const sep = raw === "" || raw.endsWith("\n") ? "" : "\n";
   appendFileSync(path, sep + JSON.stringify(entry) + "\n", "utf8");
+}
+
+/** Pi Web 的置顶开关：和 pi-web 写同一种 pi-web:pin 记录，最后一条生效 */
+export function pinSession(path: string, pinned: boolean): void {
+  appendEntry(path, {
+    type: "custom",
+    customType: "pi-web:pin",
+    data: { version: 1, pinned },
+    id: randomBytes(4).toString("hex"),
+    parentId: lastEntryId(path),
+    timestamp: new Date().toISOString(),
+  });
 }
 
 export type DeleteResult = "trash" | "rm" | false;

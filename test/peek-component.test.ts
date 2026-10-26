@@ -606,7 +606,7 @@ test("工具摘要不参与搜索和高亮", () => {
 });
 
 // 鼠标：坐标以组件左上角为原点，第 0 行标题、第 1 行搜索框、第 2 行分隔线，第 3 行起是双栏
-const MOUSE = (type: "press" | "click" | "wheel" | "release", x: number, y: number, extra: Record<string, unknown> = {}) => ({
+const MOUSE = (type: "press" | "click" | "wheel" | "release" | "drag", x: number, y: number, extra: Record<string, unknown> = {}) => ({
   type,
   button: type === "wheel" ? "none" : "left",
   x,
@@ -1137,4 +1137,315 @@ test("Alt+P：只看置顶，再按一次取消，和输入框里的 pin: 条件
   assert.equal(d.filtered.length, 1);
   d.handleInput(KEY.ap);
   assert.equal(d.filtered.length, 0);
+});
+
+// ---- 右键菜单：点会话弹菜单，菜单里能进入 / 分叉 / 改名 / 置顶 / 拷路径 / 删除 ----
+
+const RMOUSE = (type: "press" | "release" | "drag" | "click", x: number, y: number) => ({ ...MOUSE(type, x, y), button: "right" });
+
+test("右键：原地按下松开弹菜单，选中被点的会话；拖开再松不弹；点空白也不弹", () => {
+  const c = make(fixture(), "D:/nowhere");
+  c.render(120);
+  const lw = c.layout.lw;
+  // 第 3 项在主体第 4、5 行 → 组件第 7、8 行
+  assert.deepEqual(c.handleMouse(RMOUSE("press", 2, 8)), { handled: true, render: false });
+  assert.equal(c.menu, undefined, "press alone does not open the menu");
+  assert.deepEqual(c.handleMouse(RMOUSE("release", 2, 8)), { handled: true, render: true });
+  assert.equal(c.menu?.session.cwd, "D:/projX");
+  assert.equal(c.selected, 2, "right click also moves the selection");
+  // 左键点在菜单盒子里面：按那一项执行（第一项是进入对话），菜单关掉
+  const opened: string[] = [];
+  c.onResume = (sess: PeekSession) => opened.push(sess.cwd);
+  c.render(120);
+  const box = c.menuBox!;
+  const firstItemY = 3 + box.top + 1; // 第一行是上边框
+  c.handleMouse(MOUSE("press", box.left + 2, firstItemY));
+  c.handleMouse(MOUSE("release", box.left + 2, firstItemY));
+  assert.equal(c.menu, undefined);
+  assert.deepEqual(opened, ["D:/projX"], "first item opens the session");
+
+  c.handleMouse(RMOUSE("press", 2, 8));
+  c.handleMouse(RMOUSE("drag", 2, 13)); // 走开超过 3 行才算拖动
+  c.handleMouse(RMOUSE("release", 2, 13));
+  assert.equal(c.menu, undefined, "dragging does not open the menu");
+
+  c.handleMouse(RMOUSE("press", 2, 3 + 8)); // 列表下面的空白
+  c.handleMouse(RMOUSE("release", 2, 3 + 8));
+  assert.equal(c.menu, undefined);
+  assert.deepEqual(c.handleMouse(RMOUSE("press", lw + 5, 5)), { handled: true, render: false });
+  assert.deepEqual(c.handleMouse(RMOUSE("release", lw + 5, 5)), { handled: true, render: false });
+  assert.equal(c.menu, undefined, "right click in the preview does nothing");
+});
+
+test("右键菜单：画在左栏里，↑↓ 换项，Enter 执行进入；Esc 和任何别的键都关闭", () => {
+  const c = make(fixture(), "D:/nowhere");
+  const opened: string[] = [];
+  c.onResume = (s: PeekSession) => opened.push("open:" + s.cwd);
+  c.onFork = (s: PeekSession) => opened.push("fork:" + s.cwd);
+  c.render(120);
+  c.handleMouse(RMOUSE("press", 2, 8));
+  c.handleMouse(RMOUSE("release", 2, 8));
+  const rows = c.render(120).map(strip);
+  // 菜单盒子的顶边盖住了那一项的第一行，底部提示换成菜单的按键说明
+  // 菜单盒子盖在第 3 项两行的位置，左边留一列内边距；选中行前面还有 ›
+  assert.ok(rows.some((r: string) => r.includes("┌")), "menu box drawn");
+  assert.ok(rows.some((r: string) => r.includes("└")));
+  assert.ok(rows.some((r: string) => r.includes("进入对话")));
+  assert.ok(rows.some((r: string) => r.includes("删除")));
+  assert.ok(rows.at(-1).includes("Enter 确认"));
+
+  // ↓↓ 到「重命名」，↑ 回到「分叉」，Enter 就分叉
+  c.handleInput(KEY.down);
+  c.handleInput(KEY.down);
+  assert.equal(c.menu.index, 2);
+  c.handleInput(KEY.up);
+  assert.equal(c.menu.index, 1);
+  c.handleInput(KEY.enter);
+  assert.equal(c.menu, undefined);
+  assert.deepEqual(opened, ["fork:D:/projX"], "Enter on 分叉 forks the session");
+
+  // Esc 关；一个普通字符也关，且不会被打进搜索框
+  c.handleMouse(RMOUSE("press", 2, 8));
+  c.handleMouse(RMOUSE("release", 2, 8));
+  c.handleInput(KEY.esc);
+  assert.equal(c.menu, undefined);
+  c.handleMouse(RMOUSE("press", 2, 8));
+  c.handleMouse(RMOUSE("release", 2, 8));
+  const before = c.input.value;
+  c.handleInput("x");
+  assert.equal(c.menu, undefined);
+  assert.equal(c.input.value, before, "menu swallows the character");
+});
+
+test("右键菜单：点菜单项就执行那一项，点盒子外面只关闭", () => {
+  const c = make(fixture(), "D:/nowhere");
+  const forked: string[] = [];
+  c.onFork = (s: PeekSession) => forked.push(s.cwd);
+  c.render(120);
+  c.handleMouse(RMOUSE("press", 2, 8));
+  c.handleMouse(RMOUSE("release", 2, 8));
+  c.render(120); // 盒子的位置在重画时算出来
+  const box = c.menuBox;
+  assert.ok(box);
+  // 第二项「分叉」在主体 top+2 行，靠左栏
+  const y = 3 + box.top + 2;
+  assert.deepEqual(c.handleMouse(MOUSE("press", box.left + 2, y)), { handled: true, render: false });
+  assert.deepEqual(c.handleMouse(MOUSE("release", box.left + 2, y)), { handled: true, render: true });
+  assert.deepEqual(forked, ["D:/projX"]);
+  assert.equal(c.menu, undefined);
+
+  // 点外面关闭，不执行任何东西
+  c.handleMouse(RMOUSE("press", 2, 8));
+  c.handleMouse(RMOUSE("release", 2, 8));
+  c.handleMouse(MOUSE("press", 2, 1));
+  c.handleMouse(MOUSE("release", 2, 1));
+  assert.equal(c.menu, undefined);
+  assert.deepEqual(forked, ["D:/projX"]);
+});
+
+test("右键菜单：删除项要再确认一次，改名项直接进改名", async () => {
+  const c = make(fixture(), "D:/nowhere");
+  let deleted = 0;
+  c.onDelete = async () => (deleted++, true);
+  c.render(120);
+  const pick = (label: string) => {
+    c.handleMouse(RMOUSE("press", 2, 8));
+    c.handleMouse(RMOUSE("release", 2, 8));
+    const i = c.menu.items.findIndex((it: any) => it.label === label);
+    assert.ok(i >= 0, label);
+    c.runMenu(i);
+  };
+  pick("删除");
+  assert.equal(c.mode, "confirmDelete", "still asks before deleting");
+  assert.equal(deleted, 0);
+  c.handleInput("y");
+  await tick();
+  assert.equal(deleted, 1);
+
+  c.onRename = async () => true;
+  c.render(120);
+  pick("重命名");
+  assert.equal(c.mode, "rename");
+});
+
+test("右键菜单：置顶项按当前状态给文案，点完写回调并刷新图标", async () => {
+  const all = fixture();
+  const c = make(all, "D:/nowhere");
+  const written: boolean[] = [];
+  c.onPin = async (_s: PeekSession, pinned: boolean) => (written.push(pinned), true);
+  c.render(120);
+  c.handleMouse(RMOUSE("press", 2, 8));
+  c.handleMouse(RMOUSE("release", 2, 8));
+  const pinAt = c.menu.items.findIndex((it: any) => it.action === "pin");
+  assert.equal(c.menu.items[pinAt].label, "置顶");
+  c.runMenu(pinAt);
+  await tick();
+  assert.deepEqual(written, [true]);
+  assert.equal(all[2].pinned, true);
+  assert.ok(strip(c.render(120)[3 + 4]).includes("📌"), "the list shows the pin icon");
+
+  // 再开一次，文案变成「取消置顶」
+  c.render(120);
+  c.handleMouse(RMOUSE("press", 2, 8));
+  c.handleMouse(RMOUSE("release", 2, 8));
+  assert.equal(c.menu.items[pinAt].label, "取消置顶");
+  c.runMenu(pinAt);
+  await tick();
+  assert.deepEqual(written, [true, false]);
+  assert.ok(!all[2].pinned);
+});
+
+test("右键菜单：Ctrl+W 直接置顶，写文件失败会提示且不改图标；占位会话不能置顶", async () => {
+  const all = fixture();
+  const c = make(all, "D:/nowhere");
+  let ok = false;
+  c.onPin = async () => ok;
+  c.render(120);
+  c.handleInput("\x17"); // Ctrl+W
+  await tick();
+  assert.equal(all[0].pinned, undefined, "failed write leaves the session alone");
+  assert.ok(strip(c.render(120).at(-1)).includes("失败"));
+  ok = true;
+  c.handleInput("\x17");
+  await tick();
+  assert.equal(all[0].pinned, true);
+  assert.ok(strip(c.render(120).at(-1)).includes("已置顶"));
+
+  // 还没解析的占位会话：置顶会被后台解析覆盖，先提示
+  const pending = { ...fixture()[0], pending: true };
+  const d = make([pending], "D:/nowhere");
+  d.onPin = async () => true;
+  d.handleInput("\x17");
+  await tick();
+  assert.equal(pending.pinned, undefined);
+  assert.ok(strip(d.render(120).at(-1)).includes("载入"));
+});
+
+test("右键菜单：Ctrl+Y 复制完整会话路径", async () => {
+  const c = make(fixture(), "D:/nowhere");
+  const copied: string[] = [];
+  c.onCopy = async (text: string) => (copied.push(text), true);
+  c.render(120);
+  c.handleInput("\x19");
+  await tick();
+  assert.deepEqual(copied, [c.filtered[0].path]);
+  assert.ok(strip(c.render(120).at(-1)).includes("已复制"));
+  c.onCopy = async () => false;
+  c.handleInput("\x19");
+  await tick();
+  assert.ok(strip(c.render(120).at(-1)).includes("复制路径失败"));
+});
+
+test("Ctrl+Enter 给没有鼠标的人开菜单，锚在选中项上", () => {
+  const c = make(fixture(), "D:/nowhere");
+  c.render(120);
+  c.handleInput(KEY.down);
+  c.handleInput("\x1b[13;5u"); // Kitty 的 Ctrl+Enter
+  assert.equal(c.menu?.session.cwd, "D:/proj/packages/web");
+  assert.equal(c.menu?.anchorRow, 2, "anchor is the selected item's first row");
+  assert.equal(c.menu?.anchorCol, 2);
+  assert.ok(strip(c.render(120)[3 + 2]).includes("┌"));
+});
+
+test("右键菜单：弹在鼠标处，贴着点击的行和列，右栏边缘会往左翻", () => {
+  const c = make(fixture(), "D:/nowhere");
+  c.render(120);
+  // 点在左栏中间（主体第 3 行 → 组件第 6 行）：右边放得下，左上角就是鼠标那一格
+  c.handleMouse(RMOUSE("press", 20, 6));
+  c.handleMouse(RMOUSE("release", 20, 6));
+  c.render(120);
+  const box = c.menuBox!;
+  assert.equal(box.top, 3, "菜单顶边就在鼠标的行上");
+  assert.equal(box.left, 20, "菜单左上角就在鼠标的列上，不是固定贴左边");
+  assert.ok(box.left + box.width <= c.layout.lw);
+
+  // 靠右下角：下面放不下往上翻，右边放不下往左翻，位置都是算出来的精确值
+  const many = Array.from({ length: 14 }, (_, i) => mk(`D:/p${i}`, [`q${i}`, "a"], i + 1));
+  const d = make(many, "D:/nowhere");
+  d.render(120);
+  d.handleMouse(RMOUSE("press", 47, 30)); // 主体第 27 行，靠近底边；列也贴着左栏右边
+  d.handleMouse(RMOUSE("release", 47, 30));
+  d.render(120);
+  const flipped = d.menuBox!;
+  const boxH = d.menu!.items.length + 2;
+  assert.equal(flipped.top, 27 - boxH, "翻到鼠标正上方");
+  assert.equal(flipped.left, Math.min(47 - flipped.width, d.layout.lw - flipped.width - 2), "翻到鼠标左侧，再夹进左栏");
+  assert.ok(flipped.left >= 2);
+  assert.ok(flipped.left + flipped.width <= d.layout.lw, "菜单不出左栏");
+});
+
+test("右键菜单：只有 click 事件（不带 release）也能点；开菜单时的右键 click 不会误点第一项", () => {
+  const c = make(fixture(), "D:/nowhere");
+  const opened: string[] = [];
+  c.onResume = (s: PeekSession) => opened.push("open:" + s.cwd);
+  c.onFork = (s: PeekSession) => opened.push("fork:" + s.cwd);
+  c.render(120);
+  c.handleMouse(RMOUSE("press", 3, 6));
+  c.handleMouse(RMOUSE("release", 3, 6));
+  // 常规模式的桥接在松开后还会补一个 right click：不能把它当成点菜单
+  c.handleMouse(RMOUSE("click", 3, 6));
+  c.render(120);
+  assert.deepEqual(opened, [], "opening the menu must not trigger an item");
+  assert.ok(c.menu, "menu still open");
+
+  // 只发 click：点在第二项「分叉」上
+  const box = c.menuBox!;
+  const target = c.menu!.session.cwd;
+  c.handleMouse(MOUSE("click", box.left + 2, 3 + box.top + 2));
+  assert.deepEqual(opened, ["fork:" + target]);
+  assert.equal(c.menu, undefined);
+});
+
+test("右键菜单：按住松开点菜单项只执行一次，随后补的 click 不会落到下面的列表上", () => {
+  const c = make(fixture(), "D:/nowhere");
+  const forked: string[] = [];
+  const resumed: string[] = [];
+  c.onFork = (s: PeekSession) => forked.push(s.cwd);
+  c.onResume = (s: PeekSession) => resumed.push(s.cwd);
+  c.render(120);
+  // 在第二项上开菜单，选中的也是它
+  c.handleMouse(RMOUSE("press", 2, 5));
+  c.handleMouse(RMOUSE("release", 2, 5));
+  assert.equal(c.selected, 1);
+  c.render(120);
+  const box = c.menuBox!;
+  const target = c.menu!.session.cwd;
+  // 「分叉」是第二项：菜单里 screen y = BODY_TOP + top + 2
+  const x = box.left + 2;
+  const y = 3 + box.top + 2;
+  const selectedBefore = c.selected;
+  assert.deepEqual(c.handleMouse(MOUSE("press", x, y)), { handled: true, render: false });
+  c.handleMouse(MOUSE("release", x, y));
+  assert.deepEqual(forked, [target], "松开就执行");
+  assert.equal(c.menu, undefined);
+  // 同一格还会补一个 click：如果穿透，会选中菜单下面那一行的会话（或双击进入）
+  assert.deepEqual(c.handleMouse(MOUSE("click", x, y)), { handled: true, render: false });
+  assert.deepEqual(forked, [target], "只执行一次");
+  assert.deepEqual(resumed, []);
+  assert.equal(c.selected, selectedBefore, "点击没有穿透到列表");
+});
+
+test("右键菜单：点菜单外关闭，随后补的 click 也不会选中下面的会话", () => {
+  const c = make(fixture(), "D:/nowhere");
+  const resumed: string[] = [];
+  c.onResume = (s: PeekSession) => resumed.push(s.cwd);
+  c.render(120);
+  c.handleMouse(RMOUSE("press", 30, 4));
+  c.handleMouse(RMOUSE("release", 30, 4));
+  assert.equal(c.selected, 0);
+  c.render(120);
+  const box = c.menuBox!;
+  // 点在菜单左边、列表另一项的行上（第 3 项第一行 → 组件第 7 行）
+  const x = Math.max(0, box.left - 2);
+  const y = 7;
+  const hitsItem = x > box.left && x < box.left + box.width - 1 && y >= 3 + box.top + 1;
+  assert.ok(!hitsItem, "确认点在菜单外");
+  c.handleMouse(MOUSE("press", x, y));
+  c.handleMouse(MOUSE("release", x, y));
+  assert.equal(c.menu, undefined, "点外面就关");
+  const selectedBefore = c.selected;
+  // 双击次数也要试一下：穿透的话 clickCount=2 会直接进入会话
+  c.handleMouse(MOUSE("click", x, y, { clickCount: 2 }));
+  assert.deepEqual(resumed, [], "关闭菜单的 click 不能进入会话");
+  assert.equal(c.selected, selectedBefore, "也没有改选中项");
 });

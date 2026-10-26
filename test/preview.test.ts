@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { setLang } from "../src/i18n.ts";
 import { buildPreview, initialOffset, nextMatchTarget, type RenderCache } from "../src/preview.ts";
 import { parseQuery, roleTerms } from "../src/query.ts";
@@ -57,4 +58,26 @@ test("buildPreview：关键词按角色记命中行，渲染结果按（消息, 
   assert.equal(cache.get(s.msgs[1])!.lines, first, "same width reuses the rendered lines");
   buildPreview(s, rt("alpha"), 70, false, theme, mdTheme, cache);
   assert.notEqual(cache.get(s.msgs[1])!.lines, first, "another width re-renders");
+});
+
+test("buildPreview：头部有首条和最近一条用户提问，滚到哪儿都能看到", () => {
+  const cache: RenderCache = new WeakMap();
+  const p = buildPreview(sess(["第一次提问", "答", "最近的问题", "又答"]), rt(""), 60, false, theme, mdTheme, cache);
+  const lines = p.lines.map(strip);
+  assert.equal(lines[0], "D:/proj • 4 条消息");
+  assert.ok(lines.some((l) => l.startsWith("首条提问 第一次提问")), "first prompt");
+  assert.ok(lines.some((l) => l.startsWith("最近提问 最近的问题")), "latest prompt");
+
+  // 只有一条提问时不重复画两行
+  const one = buildPreview(sess(["唯一一句", "答"]), rt(""), 60, false, theme, mdTheme, cache);
+  const oneLines = one.lines.map(strip);
+  assert.equal(oneLines.filter((l) => l.includes("提问")).length, 1);
+
+  // 一条用户消息都没有的会话（理论上不会出现）不会画空行
+  const none = buildPreview(sess([], ""), rt(""), 60, false, theme, mdTheme, cache);
+  assert.ok(!none.lines.map(strip).some((l) => l.includes("提问")));
+
+  // 提问很长时按宽度裁掉，不会把右栏撑破
+  const long = buildPreview(sess(["字".repeat(400), "答"]), rt(""), 40, false, theme, mdTheme, cache);
+  for (const l of long.lines) assert.ok(visibleWidth(strip(l)) <= 40);
 });

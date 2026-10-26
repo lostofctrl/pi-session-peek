@@ -8,6 +8,7 @@ import {
   listSessionFiles,
   loadSession,
   pendingSession,
+  pinSession,
   renameSession,
   scanRoot,
   sessionsDir,
@@ -111,6 +112,17 @@ export default function (pi: ExtensionAPI) {
           lastQuery = comp.getQuery();
           stop();
           done(null);
+        };
+        // 置顶写的是 pi-web 的 pi-web:pin 记录，pi-web 的会话列表里也跟着变
+        comp.onPin = async (s, pinned) => {
+          let ok = true;
+          try {
+            pinSession(s.path, pinned);
+          } catch {
+            ok = false;
+          }
+          if (!ok) ctx.ui.notify(msg("pinFailed"), "error");
+          return ok;
         };
         comp.onDelete = async (s) => {
           // PowerShell / osascript 冷启动要一两秒，超时给宽一点

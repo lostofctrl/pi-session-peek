@@ -1,7 +1,7 @@
 import { Markdown, truncateToWidth, visibleWidth, type MarkdownTheme } from "@earendil-works/pi-tui";
 import { msg } from "./i18n.ts";
 import { anyMatch, highlight, lineHasMatch, type RoleTerms } from "./query.ts";
-import type { PeekMsg, PeekSession } from "./sessions.ts";
+import { userPrompts, type PeekMsg, type PeekSession } from "./sessions.ts";
 import { padEndVisible } from "./text.ts";
 import type { PeekTheme } from "./theme.ts";
 
@@ -63,6 +63,17 @@ export function buildPreview(
     ),
   );
   lines.push("");
+
+  // 首条 / 最近一条用户提问：滚到哪儿都能一眼看清这个会话在聊什么
+  const prompt = userPrompts(s, 160);
+  if (prompt.first) {
+    const label = (k: "firstPrompt" | "lastPrompt") => t.bold(t.fg("accent", msg(k)));
+    lines.push(truncateToWidth(`${label("firstPrompt")} ${prompt.first}`, rw));
+    if (prompt.last && prompt.last !== prompt.first) {
+      lines.push(truncateToWidth(`${label("lastPrompt")} ${prompt.last}`, rw));
+    }
+    lines.push("");
+  }
 
   const hasBody = rt.user.length > 0 || rt.assistant.length > 0;
   const truncated = s.msgs.length > MAX_MSGS;

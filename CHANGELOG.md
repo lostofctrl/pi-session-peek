@@ -2,7 +2,11 @@
 
 ## Unreleased
 
-- The list shows relative ages (`now`, `2h`, `3d`, `1w`, `4mo`, `2y`) instead of fixed timestamps, plus a status icon: `✓` when the last reply finished and `⏹` when it was aborted or failed. Unfinished tails (tools still running, or the last message is yours) get no icon. Sessions are now sorted by last prompt; `Alt+S` switches to creation time, and the age column follows the chosen order.
+- Right-click a session (or press `Ctrl+Enter`) to open a context menu: open, fork, rename, pin / unpin, copy the file path, delete. The menu opens at the pointer and flips up / left when the bottom or right edge is close, so it always stays on screen inside the list pane. `↑` `↓` pick an item, `Enter` runs it, `Esc` or any other key closes; clicking an item runs it, clicking outside closes without running anything.
+- Pin a session from the list with `Ctrl+W` or the menu. It writes the same `pi-web:pin` record Pi Web's `/pin` uses, so the state is shared both ways. Pinned sessions show `📌` in the age column, `✅` when pinned and finished and `📎` when pinned but aborted, so the status icon is not lost. Unpinning is instant, and a failed write leaves the session unchanged with a hint.
+- `Ctrl+Y` copies the selected session's full file path to the clipboard.
+- The preview header now shows the first and latest user prompt, so you can tell what a session is about without scrolling. The latest line is skipped when the session only has one prompt.
+- The list shows relative ages (`now`, `2h`, `3d`, `1w`, `4mo`, `2y`) instead of fixed timestamps, plus a status icon: `✓` when the last reply finished and `⏹` when it was aborted or failed. Pinned rows swap in `📌` / `✅` / `📎` instead. Unfinished tails (tools still running, or the last message is yours) get no icon. Sessions are now sorted by last prompt; `Alt+S` switches to creation time, and the age column follows the chosen order.
 - Search: `draft:true` / `draft:false` filter Pi Web drafts (a `draft-session` marker with no assistant reply after it; a legacy `Draft: …` name with no reply counts too). `Alt+D` toggles a drafts-only view below the query, the same way `Alt+P` does for pins.
 - The header is now a row of four switches — scope, sort, pinned, drafts — and each is clickable, not just the scope label. The `📌 pinned` badge became the `pinned: only` switch value.
 
