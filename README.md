@@ -74,6 +74,7 @@ In TUI mode, run `/peek` and start typing. Press `Enter` on a session to continu
 | --- | --- |
 | `/peek` | Open the picker. The previous keyword is remembered for the process. |
 | `/peek <keyword>` | Open the picker with the keyword filled in. |
+| `/resume-peek [keyword]` | Alias for `/peek`, with the same optional keyword and remembered search. |
 | `pi --rp` | Start pi and open the picker. Takes no argument. |
 | `pi --peek=<keyword>` | Start pi and open the picker with the keyword filled in. `--peek` requires a value. |
 

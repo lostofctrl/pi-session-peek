@@ -55,7 +55,7 @@ export default function (pi: ExtensionAPI) {
     setTimeout(() => tryOpen(0), 150);
   });
 
-  pi.registerCommand("peek", {
+  const peekCommand: Parameters<ExtensionAPI["registerCommand"]>[1] = {
     description: msg("cmdDesc"),
     handler: async (args, ctx) => {
       if (ctx.mode !== "tui") {
@@ -203,5 +203,7 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify(msg("switchCancelled"), "info");
       }
     },
-  });
+  };
+  pi.registerCommand("peek", peekCommand);
+  pi.registerCommand("resume-peek", peekCommand);
 }
