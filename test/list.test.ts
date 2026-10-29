@@ -51,12 +51,13 @@ test("visibleItems / followSelection：每项两行；选中项跑出视口才�
   assert.equal(followSelection(2, 4, 5), 2); // 出上边，偏移就是选中项
 });
 
-test("listRows：选中行带 › 和背景，时间显示成相对时间，第二行是首条消息 + [名字]", () => {
+test("listRows: selected rows show relative time and end the first line with the name", () => {
   const s = sess("D:/proj/packages/web", "hello there", "nm");
   const [a, b] = listRows(s, true, 40, NO_TERMS.rt, NO_TERMS.hasBody, theme, undefined, "prompt", NOW);
   assert.match(strip(a), /^› +2d packages\/web/);
   assert.equal(strip(a).length, 40);
-  assert.equal(strip(b), "  hello there  [nm]".padEnd(40));
+  assert.ok(strip(a).trimEnd().endsWith("[nm]"));
+  assert.equal(strip(b), "  hello there".padEnd(40));
   const [c] = listRows(s, false, 40, NO_TERMS.rt, NO_TERMS.hasBody, theme, undefined, "prompt", NOW);
   assert.match(strip(c), /^ {6}2d packages\/web/); // 没状态时状态列留空，时间列仍然对齐
 });
@@ -100,6 +101,25 @@ test("listRows：有正文关键词时第一行带命中数，第二行是高亮
   assert.ok(b.includes("\x1b[1m\x1b[4m"), "snippet highlighted");
 });
 
+test("listRows: only session names truncate, preserving first-line metadata and search snippets", () => {
+  const s = sess("D:/project-directory", "a long opening message ".repeat(10) + "needle", "Release plan");
+  const rt = roleTerms(parseQuery("needle").terms);
+  for (const selected of [false, true]) {
+    for (const hasBody of [false, true]) {
+      const [row, body] = listRows(s, selected, 40, rt, hasBody, theme);
+      const [unnamed] = listRows({ ...s, name: "" }, selected, 40, rt, hasBody, theme);
+      const metadata = strip(unnamed).trimEnd();
+      assert.ok(strip(row).startsWith(metadata + " ["), strip(row));
+      assert.ok(!strip(row).includes("Release plan"), "only the name must be shortened");
+      assert.equal(strip(row).length, 40);
+      assert.ok(!strip(body).includes("[Release plan]"));
+    }
+  }
+  const [wide, snippet] = listRows(s, false, 80, rt, true, theme);
+  assert.ok(strip(wide).trimEnd().endsWith(" [Release plan]"));
+  assert.ok(snippet.includes("\x1b[1m\x1b[4m"), "search snippet stays highlighted");
+});
+
 test("buildList：从 offset 起画满 height 行，空位补空，奇数高度补一行", () => {
   const all = [sess("D:/a", "one"), sess("D:/b", "two"), sess("D:/c", "three")];
   const rows = buildList(all, 1, 1, 5, 30, NO_TERMS.rt, NO_TERMS.hasBody, theme);
@@ -131,7 +151,7 @@ test("listRows: reuse body analysis for selection/repaints; refresh on query and
   assert.deepEqual(listRows(s, false, 50, beta, true, theme, cache), listRows(s, false, 50, beta, true, theme));
   assert.ok(reads > resizedReads, "new query refreshes matches");
   s.name = "renamed";
-  assert.ok(strip(listRows(s, false, 50, roleTerms([]), false, theme, cache)[1]).includes("[renamed]"));
+  assert.ok(strip(listRows(s, false, 50, roleTerms([]), false, theme, cache)[0]).includes("[renamed]"));
 });
 
 test("isActive：ACTIVE_MS 之内写过算活跃，正好到点不算", () => {

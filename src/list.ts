@@ -1,4 +1,4 @@
-import { truncateToWidth } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { msg } from "./i18n.ts";
 import { anyMatch, highlight, snippet, type RoleTerms, type Snippet } from "./query.ts";
 import { sessionStamp, type PeekSession, type SortMode } from "./sessions.ts";
@@ -64,15 +64,22 @@ export function listRows(
   const activeBadge = isActive(s, now) ? t.fg("success", " ●") : "";
   const head = `${sel ? "›" : " "} `;
   const rest = `${age} ${cwdTail}`;
-  const l1 = sel
+  let l1 = sel
     ? t.fg("accent", head) + statusCell(s, t) + t.fg("accent", rest) + activeBadge + t.fg("accent", hitBadge)
     : head + statusCell(s, t) + rest + activeBadge + hitBadge;
+  if (s.name) {
+    const available = lw - visibleWidth(l1) - 1;
+    if (available > 0) {
+      const name = truncateToWidth(`[${s.name}]`, available);
+      l1 += " " + (sel ? t.fg("accent", name) : name);
+    }
+  }
   const snip = hasBody ? analysis!.snip : undefined;
   const l2 = s.pending
     ? `  ${msg("loadingSession")}`
     : snip !== undefined
       ? `  ${highlight(snip.text, rt[snip.role], t)}`
-      : `  ${s.first}${s.name ? `  [${s.name}]` : ""}`;
+      : `  ${s.first}`;
   if (sel) {
     return [
       t.bg("selectedBg", padEndVisible(truncateToWidth(l1, lw), lw)),

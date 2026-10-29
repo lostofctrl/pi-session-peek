@@ -111,7 +111,7 @@ test("没有关键词时列表第二行显示首条消息和会话名", () => {
   const c = make(fixture(), "D:/nowhere");
   const rows = c.render(120).map(strip);
   assert.ok(rows[4].includes("alpha beta"));
-  const named = rows.find((r: string) => r.includes("beta alpha  [other-name]"));
+  const named = rows.find((r: string) => r.includes("[other-name]"));
   assert.ok(named);
 });
 
@@ -512,7 +512,8 @@ test("只有排除词或 name: / dir: 时列表不显示命中数和片段，预
   assert.deepEqual(c.filtered.map((s: PeekSession) => s.cwd), ["D:/other"]);
   const rows = c.render(120).map(strip);
   assert.ok(!/·\d/.test(rows[3]), rows[3]);
-  assert.ok(rows[4].includes("beta alpha  [other-name]"), rows[4]);
+  assert.ok(rows[3].includes("[other-name]"), rows[3]);
+  assert.ok(rows[4].includes("beta alpha"), rows[4]);
   assert.equal(c.matchLines.length, 0);
   assert.ok(!rows.join("\n").includes("对话正文无匹配"));
 });
